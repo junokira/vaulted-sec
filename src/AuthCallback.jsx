@@ -1,39 +1,60 @@
-import React, { useEffect } from "react";
+import { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import supabase from "../supabaseClient";
+import supabase from "./supabaseClient";
 
-const AuthCallback = () => {
+export default function AuthCallback() {
   const navigate = useNavigate();
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => {
-      if (data?.session) {
+    async function handleAuth() {
+      try {
+        // Let Supabase handle the URL callback (magic link)
+        const { data, error } = await supabase.auth.getSession();
+
+        if (error) {
+          console.error("Auth error:", error);
+          navigate("/"); // fallback to login
+          return;
+        }
+
+        if (!data?.session) {
+          console.warn("No session found after callback");
+          navigate("/"); // back to login
+          return;
+        }
+
+        const user = data.session.user;
+
+        // Check if user has a username in DB
+        const { data: profile, error: profileError } = await supabase
+          .from("users")
+          .select("username")
+          .eq("id", user.id)
+          .single();
+
+        if (profileError) {
+          console.error("Profile fetch error:", profileError.message);
+        }
+
+        if (!profile || !profile.username) {
+          // No username yet → send to profile setup
+          navigate("/profile-setup");
+        } else {
+          // Already has username → go to chats
+          navigate("/");
+        }
+      } catch (err) {
+        console.error("Unexpected error:", err);
         navigate("/");
       }
-    });
+    }
+
+    handleAuth();
   }, [navigate]);
 
-  async function handleLogin(e) {
-    e.preventDefault();
-    const email = e.target.email.value;
-    await supabase.auth.signInWithOtp({ email });
-    alert("Magic link sent!");
-  }
-
   return (
-    <form onSubmit={handleLogin} className="p-6 bg-black text-white">
-      <h2 className="text-xl font-bold mb-4">Login with Magic Link</h2>
-      <input
-        type="email"
-        name="email"
-        placeholder="Enter email"
-        className="p-2 bg-gray-800 rounded w-full mb-3"
-      />
-      <button type="submit" className="bg-blue-600 px-4 py-2 rounded w-full">
-        Send Magic Link
-      </button>
-    </form>
+    <div className="flex items-center justify-center min-h-screen bg-black text-white">
+      <p>Completing sign-in, please wait...</p>
+    </div>
   );
-};
-
-export default AuthCallback;
+}
