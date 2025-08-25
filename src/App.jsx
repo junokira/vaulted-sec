@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Plus, ArrowLeft, Send, User, MoreHorizontal } from "lucide-react";
+import { Plus, ArrowLeft, Send, User, Camera } from "lucide-react";
 import { createClient } from "@supabase/supabase-js";
 
 // --- Supabase Setup ---
@@ -19,7 +19,7 @@ export default function App() {
   const [showProfile, setShowProfile] = useState(false);
   const [showOtherProfile, setShowOtherProfile] = useState(null);
 
-  // --- Auth Session Listener ---
+  // --- Auth Session ---
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
       if (data.session) {
@@ -28,18 +28,16 @@ export default function App() {
       }
     });
 
-    const { data: listener } = supabase.auth.onAuthStateChange(
-      (_event, session) => {
-        if (session) {
-          setUser(session.user);
-          setIsLoggedIn(true);
-        } else {
-          setUser(null);
-          setIsLoggedIn(false);
-          setProfile(null);
-        }
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (session) {
+        setUser(session.user);
+        setIsLoggedIn(true);
+      } else {
+        setUser(null);
+        setIsLoggedIn(false);
+        setProfile(null);
       }
-    );
+    });
 
     return () => listener?.subscription.unsubscribe();
   }, []);
@@ -74,7 +72,6 @@ export default function App() {
   // --- Load Messages ---
   useEffect(() => {
     if (!activeChat) return;
-
     async function fetchMessages() {
       const { data } = await supabase
         .from("messages")
@@ -110,7 +107,7 @@ export default function App() {
     });
   }
 
-  // --- Add Contact (creates invite) ---
+  // --- Add Contact (send invite) ---
   async function handleAddContact(username) {
     const { data: contact } = await supabase
       .from("profiles")
@@ -135,7 +132,7 @@ export default function App() {
 
     const { error } = await supabase.auth.signInWithOtp({
       email,
-      options: { emailRedirectTo: window.location.origin + "/auth/callback" },
+      options: { emailRedirectTo: "https://vaulted-chat.vercel.app/auth/callback" }, // PRODUCTION redirect
     });
 
     if (error) {
@@ -150,7 +147,6 @@ export default function App() {
     return <UsernameSetup user={user} onComplete={(p) => setProfile(p)} />;
   }
 
-  // --- Not logged in ---
   if (!isLoggedIn) {
     return <AuthScreen onLogin={handleLogin} />;
   }
@@ -190,6 +186,8 @@ export default function App() {
               />
             )}
           </div>
+        ) : showOtherProfile ? (
+          <UserProfile userId={showOtherProfile} onClose={() => setShowOtherProfile(null)} />
         ) : (
           <div className="flex flex-col h-full">
             <ChatViewHeader
@@ -210,9 +208,6 @@ export default function App() {
               )}
             </div>
             <ChatInput onSend={handleSendMessage} />
-            {showOtherProfile && (
-              <UserProfile userId={showOtherProfile} onClose={() => setShowOtherProfile(null)} />
-            )}
           </div>
         )}
       </div>
@@ -220,205 +215,87 @@ export default function App() {
   );
 }
 
-// --- Username Setup ---
+// ✅ Username setup (same as before)
 function UsernameSetup({ user, onComplete }) {
   const [username, setUsername] = useState("");
-  const [loading, setLoading] = useState(false);
-
   async function saveUsername() {
     if (!username.trim()) return;
-    setLoading(true);
     const { data, error } = await supabase
       .from("profiles")
       .insert({ id: user.id, username })
       .select()
       .single();
-    setLoading(false);
-    if (error) {
-      alert("Error: " + error.message);
-    } else {
-      onComplete(data);
-    }
+    if (!error) onComplete(data);
   }
-
   return (
     <div className="bg-black min-h-screen flex items-center justify-center">
-      <div className="bg-gray-900 p-10 rounded-3xl shadow-2xl w-full max-w-md text-center">
+      <div className="bg-gray-900 p-10 rounded-3xl w-full max-w-md text-center">
         <h2 className="text-xl font-bold mb-4">Choose a Username</h2>
-        <input
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
-          placeholder="username"
-          className="w-full p-3 bg-gray-800 rounded-xl text-sm text-gray-200 mb-4"
-        />
-        <button
-          onClick={saveUsername}
-          disabled={loading}
-          className="w-full p-3 bg-gray-600 text-black rounded-xl hover:bg-gray-500 transition disabled:opacity-50"
-        >
-          {loading ? "Saving..." : "Continue"}
-        </button>
+        <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="username" className="w-full p-3 bg-gray-800 rounded-xl text-sm text-gray-200 mb-4" />
+        <button onClick={saveUsername} className="w-full p-3 bg-gray-600 text-black rounded-xl">Continue</button>
       </div>
     </div>
   );
 }
 
-// --- Profile Settings ---
+// ✅ Profile Settings with photo upload
 function ProfileSettings({ profile, onSave }) {
   const [username, setUsername] = useState(profile.username);
   const [status, setStatus] = useState(profile.status || "Online");
+  const [avatar, setAvatar] = useState(profile.avatar_url || "");
+
+  async function handleFileUpload(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const { data, error } = await supabase.storage.from("avatars").upload(`${profile.id}/${file.name}`, file, { upsert: true });
+    if (!error) {
+      const url = supabase.storage.from("avatars").getPublicUrl(`${profile.id}/${file.name}`).data.publicUrl;
+      setAvatar(url);
+    }
+  }
 
   async function save() {
-    await supabase
-      .from("profiles")
-      .update({ username, status })
-      .eq("id", profile.id);
-    onSave({ ...profile, username, status });
+    await supabase.from("profiles").update({ username, status, avatar_url: avatar }).eq("id", profile.id);
+    onSave({ ...profile, username, status, avatar_url: avatar });
   }
 
   return (
     <div className="p-6 space-y-4">
       <h2 className="text-xl font-bold">My Profile</h2>
+      <div className="flex flex-col items-center space-y-2">
+        <img src={avatar || "https://placehold.co/100x100"} alt="avatar" className="w-24 h-24 rounded-full object-cover" />
+        <label className="cursor-pointer text-blue-400 flex items-center space-x-1">
+          <Camera size={16} />
+          <span>Change Photo</span>
+          <input type="file" className="hidden" onChange={handleFileUpload} />
+        </label>
+      </div>
       <input value={username} onChange={(e) => setUsername(e.target.value)} className="p-2 rounded bg-gray-800 w-full"/>
       <input value={status} onChange={(e) => setStatus(e.target.value)} className="p-2 rounded bg-gray-800 w-full"/>
-      <button onClick={save} className="p-3 bg-gray-600 text-black rounded-xl">Save</button>
+      <button onClick={save} className="p-3 bg-gray-600 text-black rounded-xl w-full">Save</button>
     </div>
   );
 }
 
-// --- Auth Screen ---
-const AuthScreen = ({ onLogin }) => {
-  const [email, setEmail] = useState("");
-  const [loading, setLoading] = useState(false);
-
-  async function handleSubmit(e) {
-    e.preventDefault();
-    setLoading(true);
-    await onLogin(email);
-    setLoading(false);
-  }
-
-  return (
-    <div className="bg-black min-h-screen flex items-center justify-center">
-      <form onSubmit={handleSubmit} className="bg-gray-900 p-10 rounded-3xl shadow-2xl w-full max-w-md text-center">
-        <div className="w-16 h-16 rounded-full bg-gray-600 flex items-center justify-center mx-auto mb-6">
-          <span className="font-bold text-lg text-black">V</span>
-        </div>
-        <h2 className="text-2xl font-bold mb-2">Welcome to Vaulted</h2>
-        <p className="text-sm text-gray-400 mb-6">Enter your email to get a magic link login.</p>
-        <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} className="w-full p-3 bg-gray-800 rounded-xl text-sm text-gray-200 mb-4" placeholder="you@email.com" required />
-        <button type="submit" disabled={loading} className="w-full p-3 bg-gray-600 text-black font-semibold rounded-xl hover:bg-gray-500 transition disabled:opacity-50">
-          {loading ? "Sending..." : "Send Magic Link"}
-        </button>
-      </form>
-    </div>
-  );
-};
-
-// --- Chat UI Components ---
-const ChatListHeader = ({ onAddContact, onProfile }) => (
-  <div className="bg-black/80 p-4 flex items-center justify-between border-b border-gray-600">
-    <h1 className="text-xl font-bold">Vaulted</h1>
-    <div className="flex items-center space-x-4">
-      <User className="w-5 h-5 cursor-pointer" onClick={onProfile} />
-      <Plus className="w-5 h-5 cursor-pointer" onClick={onAddContact} />
-    </div>
-  </div>
-);
-
-function ChatListItem({ chat, userId, onClick }) {
-  const otherUserId = chat.participants.find((id) => id !== userId);
-  const [otherProfile, setOtherProfile] = useState(null);
-
-  useEffect(() => {
-    supabase.from("profiles").select("*").eq("id", otherUserId).single()
-      .then(({ data }) => setOtherProfile(data));
-  }, [otherUserId]);
-
-  return (
-    <div onClick={onClick} className="flex items-center space-x-4 p-4 rounded-xl cursor-pointer hover:bg-gray-800">
-      <div className="w-12 h-12 rounded-full bg-gray-600 flex items-center justify-center">
-        <span className="font-bold text-sm text-black">{otherProfile?.username?.[0]}</span>
-      </div>
-      <h2 className="text-gray-200 text-md font-semibold">{otherProfile?.username || "..."}</h2>
-    </div>
-  );
-}
-
-const ChatViewHeader = ({ chat, userId, onBack, onViewProfile }) => {
-  const otherUserId = chat.participants.find((id) => id !== userId);
-  const [otherProfile, setOtherProfile] = useState(null);
-
-  useEffect(() => {
-    supabase.from("profiles").select("*").eq("id", otherUserId).single()
-      .then(({ data }) => setOtherProfile(data));
-  }, [otherUserId]);
-
-  return (
-    <div className="bg-black/80 p-4 flex items-center justify-between border-b border-gray-600">
-      <div className="flex items-center">
-        <ArrowLeft className="w-5 h-5 cursor-pointer" onClick={onBack} />
-        <h2 className="ml-4 text-md font-semibold">{otherProfile?.username || "Chat"}</h2>
-      </div>
-      <MoreHorizontal className="w-5 h-5 cursor-pointer" onClick={() => onViewProfile(otherUserId)} />
-    </div>
-  );
-};
-
-const Message = ({ msg, userId }) => {
-  const isMine = msg.sender_id === userId;
-  return (
-    <div className={`flex ${isMine ? "justify-end" : "justify-start"}`}>
-      <div className={`p-3 rounded-2xl max-w-[75%] ${isMine ? "bg-gray-700" : "bg-gray-800"}`}>
-        <p>{msg.text}</p>
-      </div>
-    </div>
-  );
-};
-
-const ChatInput = ({ onSend }) => {
-  const [text, setText] = useState("");
-  return (
-    <div className="bg-black/80 p-4 flex items-center space-x-3 border-t border-gray-600">
-      <input value={text} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => e.key === "Enter" && onSend(text) && setText("")} className="flex-1 p-2 bg-gray-800/50 rounded-xl text-sm text-gray-200" placeholder="Message..." />
-      <Send className="w-5 h-5 cursor-pointer" onClick={() => { onSend(text); setText(""); }} />
-    </div>
-  );
-};
-
-const AddContactOverlay = ({ onAdd, onClose }) => {
-  const [username, setUsername] = useState("");
-  return (
-    <div className="p-8 flex flex-col space-y-4">
-      <h2 className="text-md font-semibold">Add Contact</h2>
-      <input value={username} onChange={(e) => setUsername(e.target.value)} className="p-3 bg-gray-800/50 rounded-xl text-sm text-gray-200" placeholder="username" />
-      <button onClick={() => onAdd(username)} className="p-3 bg-gray-600 text-black rounded-xl">Send Invite</button>
-      <button onClick={onClose} className="text-gray-400">Cancel</button>
-    </div>
-  );
-};
-
-// --- User Profile Viewer ---
+// ✅ Full-screen User Profile
 function UserProfile({ userId, onClose }) {
   const [profile, setProfile] = useState(null);
-
   useEffect(() => {
-    supabase.from("profiles").select("*").eq("id", userId).single()
-      .then(({ data }) => setProfile(data));
+    supabase.from("profiles").select("*").eq("id", userId).single().then(({ data }) => setProfile(data));
   }, [userId]);
 
+  if (!profile) return <p>Loading...</p>;
+
   return (
-    <div className="absolute inset-0 bg-black/90 flex items-center justify-center">
-      <div className="bg-gray-900 p-6 rounded-xl w-80 text-center space-y-3">
-        {profile ? (
-          <>
-            <h2 className="text-xl font-bold">{profile.username}</h2>
-            <p className="text-gray-400">{profile.status}</p>
-          </>
-        ) : (
-          <p>Loading...</p>
-        )}
-        <button onClick={onClose} className="p-2 bg-gray-600 text-black rounded-xl w-full">Close</button>
+    <div className="flex flex-col h-full bg-gray-900">
+      <div className="flex items-center p-4 border-b border-gray-700">
+        <ArrowLeft className="w-5 h-5 cursor-pointer" onClick={onClose} />
+        <h2 className="ml-4 text-lg font-bold">{profile.username}</h2>
+      </div>
+      <div className="flex flex-col items-center p-6 space-y-4">
+        <img src={profile.avatar_url || "https://placehold.co/150"} alt="avatar" className="w-32 h-32 rounded-full object-cover" />
+        <h3 className="text-xl">{profile.username}</h3>
+        <p className="text-gray-400">{profile.status || "Hey there! I'm using Vaulted."}</p>
       </div>
     </div>
   );
