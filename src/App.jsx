@@ -1,218 +1,224 @@
 import React, { useEffect, useState } from "react";
+import { BrowserRouter, Routes, Route } from "react-router-dom";
 import supabase from "./supabaseClient";
+
+// components
 import AuthCallback from "./AuthCallback";
+import Contacts from "./Contacts";
 import Chat from "./Chat";
 import Profile from "./Profile";
-import Contacts from "./Contacts";
 
+// ---------------------- MAIN APP ----------------------
 export default function App() {
   const [session, setSession] = useState(null);
-  const [view, setView] = useState("contacts"); // "contacts", "chat", "profile", "settings"
-  const [selectedChat, setSelectedChat] = useState(null);
-  const [profileUser, setProfileUser] = useState(null);
-  const [theme, setTheme] = useState("blue"); // blue | green
+  const [activeChat, setActiveChat] = useState(null);
+  const [viewingProfile, setViewingProfile] = useState(null);
+  const [showSettings, setShowSettings] = useState(false);
 
+  // Track auth state
   useEffect(() => {
-    const getSession = async () => {
-      const { data: { session } } = await supabase.auth.getSession();
+    supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
-    };
-    getSession();
+    });
 
     const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session);
     });
 
-    return () => listener.subscription.unsubscribe();
+    return () => {
+      listener?.subscription.unsubscribe();
+    };
   }, []);
 
   if (!session) {
-    return <AuthCallback />;
+    return <AuthScreen />;
   }
 
-  const handleOpenChat = (chat) => {
-    setSelectedChat(chat);
-    setView("chat");
-  };
+  if (viewingProfile) {
+    return (
+      <Profile
+        user={viewingProfile}
+        onClose={() => setViewingProfile(null)}
+      />
+    );
+  }
 
-  const handleOpenProfile = (user) => {
-    setProfileUser(user);
-    setView("profile");
-  };
+  if (showSettings) {
+    return <Settings session={session} onClose={() => setShowSettings(false)} />;
+  }
 
-  const handleDeleteChat = async (chatId) => {
-    await supabase.from("chats").delete().eq("id", chatId);
-    setView("contacts");
-  };
+  return (
+    <BrowserRouter>
+      <Routes>
+        {/* Supabase callback route */}
+        <Route path="/auth/callback" element={<AuthCallback />} />
 
-  const handleLogout = async () => {
-    await supabase.auth.signOut();
-    setSession(null);
-    setView("contacts");
+        {/* Main app */}
+        <Route
+          path="/*"
+          element={
+            <div className="bg-black text-gray-300 min-h-screen flex justify-center font-sans">
+              <div className="w-full max-w-lg bg-gray-900 rounded-2xl overflow-hidden shadow-xl ring-1 ring-gray-700 flex flex-col h-screen">
+                {!activeChat ? (
+                  <Contacts
+                    session={session}
+                    onSelectChat={setActiveChat}
+                    onOpenSettings={() => setShowSettings(true)}
+                  />
+                ) : (
+                  <Chat
+                    session={session}
+                    chat={activeChat}
+                    onBack={() => setActiveChat(null)}
+                    onOpenProfile={(user) => setViewingProfile(user)}
+                  />
+                )}
+              </div>
+            </div>
+          }
+        />
+      </Routes>
+    </BrowserRouter>
+  );
+}
+
+// ---------------------- AUTH SCREEN ----------------------
+function AuthScreen() {
+  const [email, setEmail] = useState("");
+  const [sending, setSending] = useState(false);
+
+  const sendMagicLink = async (e) => {
+    e.preventDefault();
+    if (!email) return;
+
+    setSending(true);
+    const { error } = await supabase.auth.signInWithOtp({
+      email,
+      options: { emailRedirectTo: `${window.location.origin}/auth/callback` },
+    });
+    setSending(false);
+
+    if (error) {
+      alert("Error: " + error.message);
+    } else {
+      alert("Check your email for the magic link!");
+    }
   };
 
   return (
-    <div
-      className={`h-screen w-screen flex flex-col ${
-        theme === "blue" ? "bg-black text-white" : "bg-gray-900 text-white"
-      }`}
-    >
-      <header className="flex items-center justify-between p-4 border-b border-gray-700">
-        <h1 className="text-xl font-bold">Vaulted</h1>
-        <div className="flex gap-4">
-          <button
-            onClick={() => setTheme(theme === "blue" ? "green" : "blue")}
-            className="text-sm px-3 py-1 rounded bg-gray-800 hover:bg-gray-700"
-          >
-            Theme
-          </button>
-          <button
-            onClick={() => setView("settings")}
-            className="text-sm px-3 py-1 rounded bg-gray-800 hover:bg-gray-700"
-          >
-            Settings
-          </button>
-          <button
-            onClick={handleLogout}
-            className="text-sm px-3 py-1 rounded bg-red-600 hover:bg-red-500"
-          >
-            Logout
-          </button>
+    <div className="bg-black min-h-screen flex items-center justify-center text-white">
+      <form
+        onSubmit={sendMagicLink}
+        className="bg-gray-900 p-8 rounded-2xl w-full max-w-sm space-y-6 shadow-lg border border-gray-700 text-center"
+      >
+        <div className="w-16 h-16 rounded-full bg-gray-600 flex items-center justify-center mx-auto">
+          <span className="font-bold text-lg text-black">V</span>
         </div>
-      </header>
-
-      <main className="flex-1 overflow-hidden">
-        {view === "contacts" && (
-          <Contacts
-            onOpenChat={handleOpenChat}
-            onOpenProfile={handleOpenProfile}
-            session={session}
-          />
-        )}
-
-        {view === "chat" && (
-          <Chat
-            chat={selectedChat}
-            session={session}
-            theme={theme}
-            onBack={() => setView("contacts")}
-            onOpenProfile={handleOpenProfile}
-          />
-        )}
-
-        {view === "profile" && (
-          <Profile
-            user={profileUser}
-            onDeleteChat={handleDeleteChat}
-            onBack={() => setView("contacts")}
-          />
-        )}
-
-        {view === "settings" && (
-          <div className="p-4">
-            <h2 className="text-lg font-bold mb-4">Settings</h2>
-            <Settings session={session} />
-            <button
-              onClick={() => setView("contacts")}
-              className="mt-6 px-4 py-2 rounded bg-gray-700 hover:bg-gray-600"
-            >
-              Back
-            </button>
-          </div>
-        )}
-      </main>
+        <h2 className="text-xl font-bold">Welcome to Vaulted</h2>
+        <p className="text-sm text-gray-400">Enter your email to sign in</p>
+        <input
+          type="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          className="w-full p-3 bg-gray-800/50 rounded-xl text-sm text-gray-200 focus:outline-none"
+          placeholder="you@email.com"
+          required
+        />
+        <button
+          type="submit"
+          disabled={sending}
+          className="w-full p-3 rounded-xl bg-gray-600 text-black font-semibold hover:bg-gray-700 disabled:opacity-50"
+        >
+          {sending ? "Sending..." : "Send Magic Link"}
+        </button>
+        <p className="text-xs text-gray-500">Your private keys never leave your device.</p>
+      </form>
     </div>
   );
 }
 
-function Settings({ session }) {
+// ---------------------- SETTINGS ----------------------
+function Settings({ session, onClose }) {
   const [username, setUsername] = useState("");
+  const [avatar, setAvatar] = useState("");
   const [bio, setBio] = useState("");
-  const [avatar, setAvatar] = useState(null);
 
   useEffect(() => {
-    const fetchProfile = async () => {
-      const { data } = await supabase
+    async function loadProfile() {
+      const { data, error } = await supabase
         .from("profiles")
-        .select("username, bio, avatar_url")
+        .select("username, avatar_url, bio")
         .eq("id", session.user.id)
         .single();
+
       if (data) {
         setUsername(data.username || "");
+        setAvatar(data.avatar_url || "");
         setBio(data.bio || "");
-        setAvatar(data.avatar_url || null);
       }
-    };
-    fetchProfile();
+      if (error) console.error(error);
+    }
+    loadProfile();
   }, [session]);
 
-  const handleSave = async () => {
-    let avatarUrl = avatar;
+  async function saveProfile(e) {
+    e.preventDefault();
+    const { error } = await supabase.from("profiles").upsert({
+      id: session.user.id,
+      username,
+      avatar_url: avatar,
+      bio,
+    });
 
-    // handle file upload
-    if (avatar instanceof File) {
-      const fileName = `${session.user.id}-${Date.now()}`;
-      const { data, error } = await supabase.storage
-        .from("avatars")
-        .upload(fileName, avatar);
-
-      if (!error) {
-        const { data: publicUrl } = supabase.storage
-          .from("avatars")
-          .getPublicUrl(fileName);
-        avatarUrl = publicUrl.publicUrl;
-      }
+    if (error) {
+      alert("Error saving profile: " + error.message);
+    } else {
+      alert("Profile updated!");
+      onClose();
     }
-
-    await supabase
-      .from("profiles")
-      .upsert({
-        id: session.user.id,
-        username,
-        bio,
-        avatar_url: avatarUrl,
-      })
-      .eq("id", session.user.id);
-
-    alert("Profile updated!");
-  };
+  }
 
   return (
-    <div className="flex flex-col gap-4">
-      <label>
-        Username
+    <div className="bg-black min-h-screen flex items-center justify-center text-white">
+      <form
+        onSubmit={saveProfile}
+        className="bg-gray-900 p-8 rounded-2xl w-full max-w-sm space-y-6 shadow-lg border border-gray-700 text-center"
+      >
+        <h2 className="text-xl font-bold">Profile Settings</h2>
         <input
           type="text"
-          className="w-full p-2 bg-gray-800 rounded"
+          placeholder="Username"
           value={username}
           onChange={(e) => setUsername(e.target.value)}
+          className="w-full p-3 bg-gray-800/50 rounded-xl text-sm text-gray-200"
         />
-      </label>
-
-      <label>
-        Bio
+        <input
+          type="text"
+          placeholder="Avatar URL"
+          value={avatar}
+          onChange={(e) => setAvatar(e.target.value)}
+          className="w-full p-3 bg-gray-800/50 rounded-xl text-sm text-gray-200"
+        />
         <textarea
-          className="w-full p-2 bg-gray-800 rounded"
+          placeholder="Bio"
           value={bio}
           onChange={(e) => setBio(e.target.value)}
+          className="w-full p-3 bg-gray-800/50 rounded-xl text-sm text-gray-200"
         />
-      </label>
-
-      <label>
-        Avatar
-        <input
-          type="file"
-          className="w-full p-2 bg-gray-800 rounded"
-          onChange={(e) => setAvatar(e.target.files[0])}
-        />
-      </label>
-
-      <button
-        onClick={handleSave}
-        className="px-4 py-2 bg-green-600 rounded hover:bg-green-500"
-      >
-        Save
-      </button>
+        <button
+          type="submit"
+          className="w-full p-3 rounded-xl bg-gray-600 text-black font-semibold hover:bg-gray-700"
+        >
+          Save
+        </button>
+        <button
+          type="button"
+          onClick={onClose}
+          className="text-gray-400 block w-full mt-2"
+        >
+          Cancel
+        </button>
+      </form>
     </div>
   );
 }
