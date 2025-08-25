@@ -1,29 +1,42 @@
-import { useEffect, useState } from 'react';
-import { supabase } from '../supabaseClient';
-import { Link } from 'react-router-dom';
+import React, { useEffect, useState, useRef } from "react";
+import supabase from "./supabaseClient";
+import { MoreVertical } from "lucide-react";
 
-export default function Chat({ session }) {
+export default function Chat({ chat, session, theme, onBack, onOpenProfile }) {
   const [messages, setMessages] = useState([]);
-  const [newMessage, setNewMessage] = useState('');
+  const [input, setInput] = useState("");
+  const [chatUsers, setChatUsers] = useState([]);
+  const bottomRef = useRef(null);
 
   useEffect(() => {
-    // Load messages
-    const loadMessages = async () => {
-      const { data, error } = await supabase
-        .from('messages')
-        .select('id, content, created_at, user_id')
-        .order('created_at', { ascending: true });
-      if (!error) setMessages(data);
+    if (!chat) return;
+
+    const fetchMessages = async () => {
+      const { data } = await supabase
+        .from("messages")
+        .select("id, content, sender_id, created_at")
+        .eq("chat_id", chat.id)
+        .order("created_at", { ascending: true });
+      setMessages(data || []);
     };
 
-    loadMessages();
+    const fetchChatUsers = async () => {
+      const { data } = await supabase
+        .from("chat_participants")
+        .select("user_id, profiles(username, avatar_url)")
+        .eq("chat_id", chat.id);
 
-    // Subscribe to new messages
+      setChatUsers(data?.map((p) => p.profiles) || []);
+    };
+
+    fetchMessages();
+    fetchChatUsers();
+
     const channel = supabase
-      .channel('public:messages')
+      .channel(`chat-${chat.id}`)
       .on(
-        'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'messages' },
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "messages", filter: `chat_id=eq.${chat.id}` },
         (payload) => {
           setMessages((prev) => [...prev, payload.new]);
         }
@@ -33,49 +46,93 @@ export default function Chat({ session }) {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, []);
+  }, [chat]);
 
-  const sendMessage = async (e) => {
-    e.preventDefault();
-    if (!newMessage.trim()) return;
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
 
-    const { error } = await supabase.from('messages').insert([
-      { content: newMessage, user_id: session.user.id }
+  const sendMessage = async () => {
+    if (!input.trim()) return;
+
+    await supabase.from("messages").insert([
+      {
+        chat_id: chat.id,
+        sender_id: session.user.id,
+        content: input.trim(),
+      },
     ]);
-
-    if (error) console.error(error);
-    setNewMessage('');
+    setInput("");
   };
 
+  const otherUser = chatUsers.find((u) => u.id !== session.user.id);
+
   return (
-    <div className="flex flex-col h-screen bg-gray-900 text-white">
-      <header className="p-4 bg-gray-800 flex justify-between items-center">
-        <h1 className="text-xl font-bold">Vaulted Chat</h1>
-        <div className="space-x-4">
-          <Link to="/profile" className="hover:underline">Profile</Link>
-          <Link to="/contacts" className="hover:underline">Contacts</Link>
+    <div className="flex flex-col h-full">
+      {/* Header */}
+      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700">
+        <button onClick={onBack} className="text-sm text-gray-400">← Back</button>
+        <div className="flex items-center gap-2">
+          <img
+            src={otherUser?.avatar_url || "/default-avatar.png"}
+            alt="avatar"
+            className="w-8 h-8 rounded-full cursor-pointer"
+            onClick={() => onOpenProfile(otherUser)}
+          />
+          <span className="font-semibold">{otherUser?.username || "Unknown"}</span>
         </div>
-      </header>
+        <button onClick={() => onOpenProfile(otherUser)}>
+          <MoreVertical size={20} />
+        </button>
+      </div>
 
-      <main className="flex-1 overflow-y-auto p-4 space-y-2">
-        {messages.map((msg) => (
-          <div key={msg.id} className={`p-2 rounded ${msg.user_id === session.user.id ? 'bg-blue-600 self-end' : 'bg-gray-700'}`}>
-            {msg.content}
-          </div>
-        ))}
-      </main>
+      {/* Messages */}
+      <div className="flex-1 overflow-y-auto p-4 space-y-3">
+        {messages.map((msg) => {
+          const isMe = msg.sender_id === session.user.id;
+          return (
+            <div
+              key={msg.id}
+              className={`flex ${isMe ? "justify-end" : "justify-start"}`}
+            >
+              <div
+                className={`px-4 py-2 rounded-lg max-w-xs ${
+                  isMe
+                    ? theme === "blue"
+                      ? "bg-blue-600 text-white"
+                      : "bg-green-600 text-white"
+                    : "bg-gray-700 text-gray-100"
+                }`}
+              >
+                {msg.content}
+              </div>
+            </div>
+          );
+        })}
+        <div ref={bottomRef} />
+      </div>
 
-      <form onSubmit={sendMessage} className="p-4 bg-gray-800 flex">
+      {/* Input */}
+      <div className="flex items-center p-3 border-t border-gray-700">
         <input
-          className="flex-1 p-2 rounded bg-gray-700"
-          placeholder="Type a message..."
-          value={newMessage}
-          onChange={(e) => setNewMessage(e.target.value)}
+          type="text"
+          className="flex-1 px-3 py-2 bg-gray-800 rounded text-white outline-none"
+          placeholder="Message..."
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && sendMessage()}
         />
-        <button className="ml-2 px-4 py-2 bg-blue-600 rounded" type="submit">
+        <button
+          onClick={sendMessage}
+          className={`ml-2 px-4 py-2 rounded ${
+            theme === "blue"
+              ? "bg-blue-600 hover:bg-blue-500"
+              : "bg-green-600 hover:bg-green-500"
+          }`}
+        >
           Send
         </button>
-      </form>
+      </div>
     </div>
   );
 }
