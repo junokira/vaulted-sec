@@ -1,45 +1,33 @@
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useState } from "react";
 import supabase from "./supabaseClient";
-import { MoreVertical } from "lucide-react";
 
-export default function Chat({ chat, session, theme, onBack, onOpenProfile }) {
+export default function Chat({ session, chat, onBack, onOpenProfile }) {
   const [messages, setMessages] = useState([]);
-  const [input, setInput] = useState("");
-  const [chatUsers, setChatUsers] = useState([]);
-  const bottomRef = useRef(null);
+  const [newMessage, setNewMessage] = useState("");
+  const [showMenu, setShowMenu] = useState(false);
 
   useEffect(() => {
-    if (!chat) return;
+    if (!chat?.id) return;
 
     const fetchMessages = async () => {
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from("messages")
-        .select("id, content, sender_id, created_at")
+        .select("id, content, sender_id, created_at, profiles(username, avatar_url)")
         .eq("chat_id", chat.id)
         .order("created_at", { ascending: true });
-      setMessages(data || []);
-    };
 
-    const fetchChatUsers = async () => {
-      const { data } = await supabase
-        .from("chat_participants")
-        .select("user_id, profiles(username, avatar_url)")
-        .eq("chat_id", chat.id);
-
-      setChatUsers(data?.map((p) => p.profiles) || []);
+      if (!error) setMessages(data);
     };
 
     fetchMessages();
-    fetchChatUsers();
 
+    // subscribe realtime
     const channel = supabase
-      .channel(`chat-${chat.id}`)
+      .channel(`chat:${chat.id}`)
       .on(
         "postgres_changes",
         { event: "INSERT", schema: "public", table: "messages", filter: `chat_id=eq.${chat.id}` },
-        (payload) => {
-          setMessages((prev) => [...prev, payload.new]);
-        }
+        (payload) => setMessages((prev) => [...prev, payload.new])
       )
       .subscribe();
 
@@ -48,46 +36,66 @@ export default function Chat({ chat, session, theme, onBack, onOpenProfile }) {
     };
   }, [chat]);
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
-
   const sendMessage = async () => {
-    if (!input.trim()) return;
-
+    if (!newMessage.trim()) return;
     await supabase.from("messages").insert([
       {
         chat_id: chat.id,
         sender_id: session.user.id,
-        content: input.trim(),
+        content: newMessage,
       },
     ]);
-    setInput("");
+    setNewMessage("");
   };
 
-  const otherUser = chatUsers.find((u) => u.id !== session.user.id);
+  const deleteChat = async () => {
+    await supabase.from("chats").delete().eq("id", chat.id);
+    onBack(); // go back after deleting
+  };
+
+  // Pick the other participant (not me)
+  const otherUser = chat.participants.find((p) => p.id !== session.user.id);
 
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700">
-        <button onClick={onBack} className="text-sm text-gray-400">← Back</button>
-        <div className="flex items-center gap-2">
+      <div
+        className="flex items-center justify-between p-4 bg-gray-900 border-b border-gray-800 cursor-pointer"
+        onClick={() => onOpenProfile(otherUser)}
+      >
+        <div className="flex items-center gap-3">
           <img
             src={otherUser?.avatar_url || "/default-avatar.png"}
             alt="avatar"
-            className="w-8 h-8 rounded-full cursor-pointer"
-            onClick={() => onOpenProfile(otherUser)}
+            className="w-10 h-10 rounded-full"
           />
-          <span className="font-semibold">{otherUser?.username || "Unknown"}</span>
+          <p className="font-semibold">{otherUser?.username || "Unknown"}</p>
         </div>
-        <button onClick={() => onOpenProfile(otherUser)}>
-          <MoreVertical size={20} />
-        </button>
+        <div className="relative">
+          <button
+            className="text-xl"
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowMenu((prev) => !prev);
+            }}
+          >
+            ⋮
+          </button>
+          {showMenu && (
+            <div className="absolute right-0 mt-2 w-32 bg-gray-800 rounded-md shadow-lg">
+              <button
+                className="block w-full text-left px-4 py-2 text-red-400 hover:bg-gray-700"
+                onClick={deleteChat}
+              >
+                Delete Chat
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-3">
+      <div className="flex-1 overflow-y-auto p-4 space-y-2">
         {messages.map((msg) => {
           const isMe = msg.sender_id === session.user.id;
           return (
@@ -97,11 +105,7 @@ export default function Chat({ chat, session, theme, onBack, onOpenProfile }) {
             >
               <div
                 className={`px-4 py-2 rounded-lg max-w-xs ${
-                  isMe
-                    ? theme === "blue"
-                      ? "bg-blue-600 text-white"
-                      : "bg-green-600 text-white"
-                    : "bg-gray-700 text-gray-100"
+                  isMe ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-100"
                 }`}
               >
                 {msg.content}
@@ -109,26 +113,20 @@ export default function Chat({ chat, session, theme, onBack, onOpenProfile }) {
             </div>
           );
         })}
-        <div ref={bottomRef} />
       </div>
 
       {/* Input */}
-      <div className="flex items-center p-3 border-t border-gray-700">
+      <div className="p-4 flex gap-2 border-t border-gray-800">
         <input
-          type="text"
-          className="flex-1 px-3 py-2 bg-gray-800 rounded text-white outline-none"
-          placeholder="Message..."
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
+          value={newMessage}
+          onChange={(e) => setNewMessage(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && sendMessage()}
+          className="flex-1 px-4 py-2 rounded-lg bg-gray-800 text-white focus:outline-none"
+          placeholder="Message..."
         />
         <button
           onClick={sendMessage}
-          className={`ml-2 px-4 py-2 rounded ${
-            theme === "blue"
-              ? "bg-blue-600 hover:bg-blue-500"
-              : "bg-green-600 hover:bg-green-500"
-          }`}
+          className="px-4 py-2 bg-blue-600 rounded-lg text-white"
         >
           Send
         </button>
