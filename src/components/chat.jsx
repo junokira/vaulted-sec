@@ -1,27 +1,41 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import supabase from "./supabaseClient";
 
 export default function Chat({ session, chat, onBack, onOpenProfile }) {
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState("");
+  const [otherUser, setOtherUser] = useState(null);
   const [showMenu, setShowMenu] = useState(false);
+  const bottomRef = useRef(null);
 
+  // Fetch chat messages + other user
   useEffect(() => {
     if (!chat?.id) return;
 
-    const fetchMessages = async () => {
-      const { data, error } = await supabase
+    const fetchData = async () => {
+      // Messages
+      const { data: msgData } = await supabase
         .from("messages")
-        .select("id, content, sender_id, created_at, profiles(username, avatar_url)")
+        .select("id, content, sender_id, created_at")
         .eq("chat_id", chat.id)
         .order("created_at", { ascending: true });
+      setMessages(msgData || []);
 
-      if (!error) setMessages(data);
+      // Other user
+      const { data: participants } = await supabase
+        .from("chat_participants")
+        .select("user_id, profiles(username, avatar_url)")
+        .eq("chat_id", chat.id);
+
+      if (participants) {
+        const other = participants.find((p) => p.user_id !== session.user.id);
+        setOtherUser(other?.profiles || null);
+      }
     };
 
-    fetchMessages();
+    fetchData();
 
-    // subscribe realtime
+    // Realtime subscription
     const channel = supabase
       .channel(`chat:${chat.id}`)
       .on(
@@ -34,7 +48,11 @@ export default function Chat({ session, chat, onBack, onOpenProfile }) {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [chat]);
+  }, [chat, session.user.id]);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
 
   const sendMessage = async () => {
     if (!newMessage.trim()) return;
@@ -50,18 +68,15 @@ export default function Chat({ session, chat, onBack, onOpenProfile }) {
 
   const deleteChat = async () => {
     await supabase.from("chats").delete().eq("id", chat.id);
-    onBack(); // go back after deleting
+    onBack();
   };
-
-  // Pick the other participant (not me)
-  const otherUser = chat.participants.find((p) => p.id !== session.user.id);
 
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
       <div
         className="flex items-center justify-between p-4 bg-gray-900 border-b border-gray-800 cursor-pointer"
-        onClick={() => onOpenProfile(otherUser)}
+        onClick={() => otherUser && onOpenProfile(otherUser)}
       >
         <div className="flex items-center gap-3">
           <img
@@ -113,6 +128,7 @@ export default function Chat({ session, chat, onBack, onOpenProfile }) {
             </div>
           );
         })}
+        <div ref={bottomRef} />
       </div>
 
       {/* Input */}
