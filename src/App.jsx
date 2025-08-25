@@ -1,39 +1,44 @@
-import React, { useState, useEffect } from "react";
-import { Search, Plus, ArrowLeft, Send, Phone, Video } from "lucide-react";
-import { createClient } from "@supabase/supabase-js";
+import React, { useState, useEffect } from 'react';
+import { Search, Plus, ArrowLeft, Send, User } from 'lucide-react';
+import { createClient } from '@supabase/supabase-js';
 
+// --- Supabase Setup (now using env vars) ---
 const supabase = createClient(
-  "https://YOUR_PROJECT.supabase.co", // your Supabase URL
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRpcGJ4b3pvc21xb2NnaGdjbHFtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTYxMjUwODYsImV4cCI6MjA3MTcwMTA4Nn0.kJH6WtMK-EWuvoOAkVmMhgiYdTG7Ro7ghApMKWZgTLc" // your Supabase anon key
+  import.meta.env.VITE_SUPABASE_URL,
+  import.meta.env.VITE_SUPABASE_ANON_KEY
 );
 
 export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [user, setUser] = useState(null);
+  const [profile, setProfile] = useState(null);
   const [activeChat, setActiveChat] = useState(null);
   const [messages, setMessages] = useState([]);
   const [chats, setChats] = useState([]);
   const [showAddContact, setShowAddContact] = useState(false);
-  const [showProfile, setShowProfile] = useState(null);
+  const [showProfile, setShowProfile] = useState(false);
 
-  // --- Auth setup ---
+  // --- Supabase Auth ---
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => {
+    supabase.auth.getSession().then(async ({ data }) => {
       if (data.session) {
         setUser(data.session.user);
         setIsLoggedIn(true);
+        await loadProfile(data.session.user.id);
         loadChats();
       }
     });
 
     const { data: listener } = supabase.auth.onAuthStateChange(
-      (_event, session) => {
+      async (_event, session) => {
         if (session) {
           setUser(session.user);
           setIsLoggedIn(true);
+          await loadProfile(session.user.id);
           loadChats();
         } else {
           setUser(null);
+          setProfile(null);
           setIsLoggedIn(false);
         }
       }
@@ -42,24 +47,15 @@ export default function App() {
     return () => listener?.subscription.unsubscribe();
   }, []);
 
-  // --- Handle redirect from magic link ---
-  useEffect(() => {
-    async function handleRedirect() {
-      if (window.location.hash.includes("access_token")) {
-        const { data } = await supabase.auth.getSession();
-        if (data.session) {
-          setUser(data.session.user);
-          setIsLoggedIn(true);
-          window.history.replaceState({}, document.title, "/");
-        }
-      }
-    }
-    handleRedirect();
-  }, []);
+  // --- Load Profile ---
+  async function loadProfile(userId) {
+    const { data } = await supabase.from('profiles').select('*').eq('id', userId).single();
+    setProfile(data);
+  }
 
   // --- Load Chats ---
   async function loadChats() {
-    const { data, error } = await supabase.from("chats").select("*");
+    const { data, error } = await supabase.from('chats').select('*');
     if (!error) setChats(data);
   }
 
@@ -68,25 +64,20 @@ export default function App() {
     if (!activeChat) return;
 
     async function fetchMessages() {
-      const { data } = await supabase
-        .from("messages")
-        .select("*, profiles(username, avatar_url)")
-        .eq("chat_id", activeChat.id)
-        .order("created_at", { ascending: true });
-      setMessages(data || []);
+      const { data, error } = await supabase
+        .from('messages')
+        .select('*')
+        .eq('chat_id', activeChat.id)
+        .order('created_at', { ascending: true });
+      if (!error) setMessages(data);
     }
     fetchMessages();
 
     const channel = supabase
-      .channel("room:" + activeChat.id)
+      .channel('room:' + activeChat.id)
       .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "messages",
-          filter: `chat_id=eq.${activeChat.id}`,
-        },
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'messages', filter: `chat_id=eq.${activeChat.id}` },
         (payload) => {
           setMessages((prev) => [...prev, payload.new]);
         }
@@ -101,7 +92,7 @@ export default function App() {
   // --- Send Message ---
   async function handleSendMessage(text) {
     if (!text.trim()) return;
-    await supabase.from("messages").insert({
+    await supabase.from('messages').insert({
       chat_id: activeChat.id,
       sender_id: user.id,
       text,
@@ -111,16 +102,16 @@ export default function App() {
   // --- Add Contact ---
   async function handleAddContact(username) {
     const { data: contact } = await supabase
-      .from("profiles")
-      .select("id, username")
-      .eq("username", username)
+      .from('profiles')
+      .select('id, username, avatar_url')
+      .eq('username', username)
       .single();
 
     if (contact) {
       const { data } = await supabase
-        .from("chats")
+        .from('chats')
         .insert({
-          name: username,
+          name: contact.username,
           participants: [user.id, contact.id],
         })
         .select()
@@ -133,53 +124,51 @@ export default function App() {
   // --- Magic Link Login ---
   async function handleLogin(email) {
     if (!email) {
-      alert("Please enter a valid email");
+      alert('Please enter a valid email');
       return;
     }
 
-    const redirectTo =
-      process.env.NODE_ENV === "development"
-        ? "http://localhost:3000/auth/callback"
-        : "https://vaulted-chat.vercel.app/auth/callback";
-
     const { error } = await supabase.auth.signInWithOtp({
       email,
-      options: { emailRedirectTo: redirectTo },
+      options: {
+        emailRedirectTo: `${window.location.origin}/auth/callback`,
+      },
     });
 
     if (error) {
       console.error(error);
-      alert("Error sending magic link: " + error.message);
+      alert('Error sending magic link: ' + error.message);
     } else {
-      alert("Check your email for a magic link ✉️");
+      alert('Check your email for a magic link from Vaulted ✉️');
     }
   }
 
-  // --- UI Render ---
+  // --- UI Logic ---
   const renderContent = () => {
-    if (!isLoggedIn) return <AuthScreen onLogin={handleLogin} />;
+    if (!isLoggedIn) {
+      return <AuthScreen onLogin={handleLogin} />;
+    }
 
-    if (showAddContact)
+    if (showProfile && profile) {
+      return <ProfileScreen profile={profile} onClose={() => setShowProfile(false)} />;
+    }
+
+    if (showAddContact) {
       return (
         <AddContactOverlay
           onAdd={handleAddContact}
           onClose={() => setShowAddContact(false)}
         />
       );
+    }
 
-    if (showProfile)
-      return (
-        <ProfileScreen
-          profile={showProfile}
-          onClose={() => setShowProfile(null)}
-          isMe={showProfile.id === user.id}
-        />
-      );
-
-    if (!activeChat)
+    if (!activeChat) {
       return (
         <div>
-          <ChatListHeader onAddContact={() => setShowAddContact(true)} />
+          <ChatListHeader
+            onAddContact={() => setShowAddContact(true)}
+            onProfile={() => setShowProfile(true)}
+          />
           <div className="p-4 space-y-2">
             {chats.map((chat) => (
               <ChatListItem
@@ -191,14 +180,11 @@ export default function App() {
           </div>
         </div>
       );
+    }
 
     return (
       <div className="flex flex-col h-full">
-        <ChatViewHeader
-          chat={activeChat}
-          onBack={() => setActiveChat(null)}
-          onProfile={() => setShowProfile(activeChat)}
-        />
+        <ChatViewHeader chat={activeChat} onBack={() => setActiveChat(null)} />
         <div className="flex-1 overflow-y-auto p-4 space-y-4 text-sm">
           {messages.map((msg) => (
             <Message key={msg.id} msg={msg} userId={user.id} />
@@ -219,11 +205,13 @@ export default function App() {
 }
 
 // --- Components ---
-
-const ChatListHeader = ({ onAddContact }) => (
+const ChatListHeader = ({ onAddContact, onProfile }) => (
   <div className="bg-black/80 p-4 flex items-center justify-between border-b border-gray-600">
     <h1 className="text-xl font-bold">Vaulted</h1>
-    <Plus className="w-5 h-5 cursor-pointer" onClick={onAddContact} />
+    <div className="flex items-center space-x-4">
+      <User className="w-5 h-5 cursor-pointer" onClick={onProfile} />
+      <Plus className="w-5 h-5 cursor-pointer" onClick={onAddContact} />
+    </div>
   </div>
 );
 
@@ -235,23 +223,16 @@ const ChatListItem = ({ chat, onClick }) => (
     <div className="w-12 h-12 rounded-full bg-gray-600 flex items-center justify-center">
       <span className="font-bold text-sm text-black">{chat.name[0]}</span>
     </div>
-    <h2 className="text-gray-200 text-md font-semibold">{chat.name}</h2>
+    <div className="flex-1">
+      <h2 className="text-gray-200 text-md font-semibold">{chat.name}</h2>
+    </div>
   </div>
 );
 
-const ChatViewHeader = ({ chat, onBack, onProfile }) => (
-  <div className="bg-black/80 p-4 flex items-center justify-between border-b border-gray-600">
+const ChatViewHeader = ({ chat, onBack }) => (
+  <div className="bg-black/80 p-4 flex items-center border-b border-gray-600">
     <ArrowLeft className="w-5 h-5 cursor-pointer" onClick={onBack} />
-    <h2
-      className="ml-4 text-md font-semibold cursor-pointer"
-      onClick={onProfile}
-    >
-      {chat.name}
-    </h2>
-    <div className="flex items-center space-x-3">
-      <Phone className="w-5 h-5" />
-      <Video className="w-5 h-5" />
-    </div>
+    <h2 className="ml-4 text-md font-semibold">{chat.name}</h2>
   </div>
 );
 
@@ -260,7 +241,7 @@ const Message = ({ msg, userId }) => {
   return (
     <div
       className={`p-3 rounded-2xl max-w-[75%] ${
-        isMine ? "bg-gray-700 self-end" : "bg-gray-800 self-start"
+        isMine ? 'bg-gray-700 self-end' : 'bg-gray-800 self-start'
       }`}
     >
       <p>{msg.text}</p>
@@ -269,13 +250,13 @@ const Message = ({ msg, userId }) => {
 };
 
 const ChatInput = ({ onSend }) => {
-  const [text, setText] = useState("");
+  const [text, setText] = useState('');
   return (
     <div className="bg-black/80 p-4 flex items-center space-x-3 border-t border-gray-600">
       <input
         value={text}
         onChange={(e) => setText(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && onSend(text) && setText("")}
+        onKeyDown={(e) => e.key === 'Enter' && onSend(text) && setText('')}
         className="flex-1 p-2 bg-gray-800/50 rounded-xl text-sm text-gray-200"
         placeholder="Message..."
       />
@@ -283,7 +264,7 @@ const ChatInput = ({ onSend }) => {
         className="w-5 h-5 cursor-pointer"
         onClick={() => {
           onSend(text);
-          setText("");
+          setText('');
         }}
       />
     </div>
@@ -291,7 +272,7 @@ const ChatInput = ({ onSend }) => {
 };
 
 const AuthScreen = ({ onLogin }) => {
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState('');
   const [loading, setLoading] = useState(false);
 
   async function handleSubmit(e) {
@@ -310,7 +291,9 @@ const AuthScreen = ({ onLogin }) => {
         <span className="font-bold text-lg text-black">V</span>
       </div>
       <h2 className="text-xl font-bold">Welcome to Vaulted</h2>
-      <p className="text-sm text-gray-500">Enter your email to get a magic link login.</p>
+      <p className="text-sm text-gray-500">
+        Enter your email to get a magic link login.
+      </p>
       <input
         type="email"
         value={email}
@@ -324,14 +307,14 @@ const AuthScreen = ({ onLogin }) => {
         disabled={loading}
         className="p-3 bg-gray-600 text-black rounded-xl disabled:opacity-50"
       >
-        {loading ? "Sending..." : "Send Magic Link"}
+        {loading ? 'Sending...' : 'Send Magic Link'}
       </button>
     </form>
   );
 };
 
 const AddContactOverlay = ({ onAdd, onClose }) => {
-  const [username, setUsername] = useState("");
+  const [username, setUsername] = useState('');
   return (
     <div className="p-8 flex flex-col space-y-4">
       <h2 className="text-md font-semibold">Add Contact</h2>
@@ -354,66 +337,28 @@ const AddContactOverlay = ({ onAdd, onClose }) => {
   );
 };
 
-// --- Profile screen (like WhatsApp full view) ---
-const ProfileScreen = ({ profile, onClose, isMe }) => {
-  const [username, setUsername] = useState(profile.username || "");
-  const [avatarUrl, setAvatarUrl] = useState(profile.avatar_url || "");
-
-  async function handleSave() {
-    const { error } = await supabase
-      .from("profiles")
-      .update({ username, avatar_url: avatarUrl })
-      .eq("id", profile.id);
-    if (error) console.error(error);
-    onClose();
-  }
-
-  return (
-    <div className="p-8 flex flex-col space-y-6 items-center">
-      <div className="w-24 h-24 rounded-full bg-gray-700 flex items-center justify-center">
-        {avatarUrl ? (
-          <img
-            src={avatarUrl}
-            alt="avatar"
-            className="w-24 h-24 rounded-full object-cover"
-          />
-        ) : (
-          <span className="font-bold text-2xl text-black">
-            {username?.[0] || "?"}
-          </span>
-        )}
-      </div>
-      {isMe && (
-        <>
-          <input
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            className="p-3 bg-gray-800/50 rounded-xl text-sm text-gray-200 w-full"
-            placeholder="Set username"
-          />
-          <input
-            value={avatarUrl}
-            onChange={(e) => setAvatarUrl(e.target.value)}
-            className="p-3 bg-gray-800/50 rounded-xl text-sm text-gray-200 w-full"
-            placeholder="Paste avatar image URL"
-          />
-          <button
-            onClick={handleSave}
-            className="p-3 bg-gray-600 text-black rounded-xl"
-          >
-            Save
-          </button>
-        </>
+const ProfileScreen = ({ profile, onClose }) => (
+  <div className="p-8 flex flex-col space-y-4">
+    <div className="w-24 h-24 rounded-full bg-gray-600 flex items-center justify-center mx-auto">
+      {profile.avatar_url ? (
+        <img
+          src={profile.avatar_url}
+          alt="avatar"
+          className="w-24 h-24 rounded-full object-cover"
+        />
+      ) : (
+        <span className="font-bold text-3xl text-black">
+          {profile.username?.[0] || 'U'}
+        </span>
       )}
-      {!isMe && (
-        <>
-          <h2 className="text-lg font-semibold">{username}</h2>
-          <p className="text-gray-500">Contact profile</p>
-        </>
-      )}
-      <button onClick={onClose} className="text-gray-400">
-        Back
-      </button>
     </div>
-  );
-};
+    <h2 className="text-lg font-semibold text-center">{profile.username}</h2>
+    <p className="text-sm text-center text-gray-400">{profile.email}</p>
+    <button
+      onClick={onClose}
+      className="p-3 bg-gray-600 text-black rounded-xl mt-4"
+    >
+      Close
+    </button>
+  </div>
+);
