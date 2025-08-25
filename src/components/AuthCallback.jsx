@@ -1,28 +1,25 @@
 import { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { supabase } from '../supabaseClient';
+import supabase from '../supabaseClient';
 
 export default function AuthCallback() {
   const navigate = useNavigate();
 
   useEffect(() => {
-    const handleCallback = async () => {
-      const { data: { session }, error } = await supabase.auth.getSession();
-      if (error || !session) {
-        console.error(error);
-        alert('Login failed. Please try again.');
-        navigate('/');
+    // Supabase parses the hash itself, we just need to wait for the session
+    const run = async () => {
+      // Give the SDK a moment to process the URL hash
+      await new Promise(r => setTimeout(r, 50));
+
+      const { data } = await supabase.auth.getSession();
+      if (data?.session) {
+        navigate('/', { replace: true });
       } else {
-        navigate('/chat');
+        navigate('/?login=failed', { replace: true });
       }
     };
-
-    handleCallback();
+    run();
   }, [navigate]);
 
-  return (
-    <div className="flex items-center justify-center min-h-screen text-white bg-black">
-      <p>Signing you in...</p>
-    </div>
-  );
+  return null;
 }
