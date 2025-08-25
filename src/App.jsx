@@ -2,10 +2,10 @@ import React, { useEffect, useState } from "react";
 import { BrowserRouter as Router, Routes, Route, useNavigate } from "react-router-dom";
 import supabase from "./supabaseClient";
 
-import Chat from "./components/chat";
-import Contacts from "./components/contacts";
-import Profile from "./components/profile";
 import AuthCallback from "./components/AuthCallback";
+import Chat from "./components/chat";
+import Profile from "./components/profile";
+import Contacts from "./components/contacts";
 import Settings from "./settings";
 
 const App = () => {
