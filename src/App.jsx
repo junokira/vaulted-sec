@@ -27,6 +27,7 @@ export default function App() {
   const [showAddContact, setShowAddContact] = useState(false);
   const [invites, setInvites] = useState([]);
   const [loadingChats, setLoadingChats] = useState(false);
+  const [processingInviteIds, setProcessingInviteIds] = useState(new Set());
 
   const messageChannelRef = useRef(null);
 
@@ -35,13 +36,13 @@ export default function App() {
     supabase.auth.getSession().then(({ data }) => {
       if (data?.session) {
         setSession(data.session);
-        handleLogin(data.session);
+        onLoggedIn(data.session);
       }
     });
 
     const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session);
-      if (session) handleLogin(session);
+      if (session) onLoggedIn(session);
       else {
         // signed out
         setUserProfile(null);
@@ -56,17 +57,15 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function handleLogin(sessionObj) {
+  async function onLoggedIn(sessionObj) {
     if (!sessionObj) return;
-    const u = sessionObj.user;
-    // ensure users row exists to satisfy FK constraints for messages/invites
-    await ensureUserId(u.id);
-    await fetchProfile(u.id);
+    await ensureUserId(sessionObj.user.id);
+    await fetchProfile(sessionObj.user.id);
     await loadChats();
     await loadInvites();
   }
 
-  /* --- Helpers to ensure user row exists (fix foreign key violations) --- */
+  /* --- ensure a users row exists (fixes FK errors) --- */
   async function ensureUserId(id) {
     if (!id) return;
     try {
@@ -82,8 +81,8 @@ export default function App() {
     try {
       const { data } = await supabase.from("profiles").select("id, username, avatar").eq("id", userId).single();
       setUserProfile(data || null);
-      // optional: mirror username into users table
       if (data?.username) {
+        // mirror to users
         await supabase.from("users").upsert({ id: userId, username: data.username }, { onConflict: "id" });
       }
     } catch (err) {
@@ -92,7 +91,7 @@ export default function App() {
     }
   }
 
-  /* --- Chats & Invites loading --- */
+  /* --- Chats & Invites load --- */
   async function loadChats() {
     if (!session) return;
     setLoadingChats(true);
@@ -109,7 +108,6 @@ export default function App() {
         return;
       }
 
-      // fetch participant usernames
       const chatsWithNames = await Promise.all(
         (data || []).map(async (c) => {
           const { data: profiles } = await supabase.from("profiles").select("id, username").in("id", c.participants || []);
@@ -120,6 +118,7 @@ export default function App() {
       setChats(chatsWithNames);
     } catch (err) {
       console.error("loadChats err", err);
+      setChats([]);
     } finally {
       setLoadingChats(false);
     }
@@ -150,7 +149,7 @@ export default function App() {
 
       setInvites(invitesWithNames);
     } catch (err) {
-      console.error("loadInvites err", err);
+      console.error("loadInvites err:", err);
       setInvites([]);
     }
   }
@@ -203,9 +202,7 @@ export default function App() {
           setMessages((prev) => [...(prev || []), payload.new]);
         }
       )
-      .subscribe((status) => {
-        // optional: console.log("sub status", status);
-      });
+      .subscribe();
 
     messageChannelRef.current = channel;
   }
@@ -226,7 +223,6 @@ export default function App() {
   async function sendMessage(chatId, text) {
     if (!chatId || !text?.trim() || !session) return;
     try {
-      // ensure current user exists in users (prevents FK fail)
       await ensureUserId(session.user.id);
 
       const { data, error } = await supabase.from("messages").insert([
@@ -235,7 +231,7 @@ export default function App() {
 
       if (error) {
         console.error("sendMessage error", error);
-        // If FK error, attempt ensure and retry once
+        // If foreign key fail, try ensure and retry once
         if (error.code === "23503" || /foreign key/i.test(error.message || "")) {
           await ensureUserId(session.user.id);
           const r = await supabase.from("messages").insert([
@@ -246,7 +242,6 @@ export default function App() {
         }
         throw error;
       }
-      // realtime will append message to messages array; return inserted
       return data;
     } catch (err) {
       console.error("sendMessage catch:", err);
@@ -255,33 +250,41 @@ export default function App() {
     }
   }
 
-  /* --- Find or create chat between two users, return the chat object --- */
+  /* --- Robust chat finder/creator
+     Strategy:
+       1) Fetch all chats that include the current user (server-side).
+       2) Client-side find any chat whose participants array includes the other user exactly.
+       3) If none found, attempt to insert a chat with both participants.
+  */
   async function getOrCreateChatWith(participantId, displayName) {
     if (!session || !participantId) return null;
     const me = session.user.id;
-    // ensure both user rows exist to prevent FK issues later
+
+    // ensure both users exist
     await ensureUserId(me);
     await ensureUserId(participantId);
 
     try {
-      // try to find existing chat that contains both participant ids
-      const { data: found, error: findErr } = await supabase
+      // fetch chats that include me
+      const { data: candidateChats, error: candErr } = await supabase
         .from("chats")
         .select("id, name, participants")
-        .contains("participants", [me, participantId]);
+        .contains("participants", [me]);
 
-      if (findErr) {
-        console.error("getOrCreateChatWith findErr:", findErr);
+      if (candErr) {
+        console.error("getOrCreateChatWith - candidate fetch error:", candErr);
       }
 
-      if (found && found.length > 0) {
-        // pick the first
-        const chat = found[0];
-        await loadChats(); // refresh list
-        return chat;
+      // client-side find chat where participants includes participantId
+      const found = (candidateChats || []).find((c) => Array.isArray(c.participants) && c.participants.includes(participantId));
+
+      if (found) {
+        // refresh chat list and return found
+        await loadChats();
+        return found;
       }
 
-      // create new chat
+      // not found -> create new chat
       const { data: inserted, error: insertErr } = await supabase
         .from("chats")
         .insert([{ name: displayName || null, participants: [me, participantId] }])
@@ -289,11 +292,10 @@ export default function App() {
         .single();
 
       if (insertErr) {
-        console.error("getOrCreateChatWith insertErr:", insertErr);
+        console.error("getOrCreateChatWith - insert err:", insertErr);
         return null;
       }
 
-      // refresh chat list
       await loadChats();
       return inserted;
     } catch (err) {
@@ -317,7 +319,6 @@ export default function App() {
         return { error: "User not found" };
       }
 
-      // ensure current user row exists
       await ensureUserId(session.user.id);
 
       const { error } = await supabase.from("invites").insert([
@@ -332,38 +333,56 @@ export default function App() {
       await loadInvites();
       return { ok: true };
     } catch (err) {
-      console.error("sendInviteToUsername err", err);
+      console.error("sendInviteToUsername err:", err);
       return { error: "Error sending invite" };
     }
   }
 
-  async function acceptInvite(inviteId, senderId) {
+  /* --- Accept invite: robust, with processing flag to avoid races --- */
+  async function acceptInvite(inviteId, senderId, senderName) {
     if (!inviteId || !senderId || !session) return;
-    try {
-      // update invite
-      const { error: uerr } = await supabase.from("invites").update({ status: "accepted" }).eq("id", inviteId);
-      if (uerr) {
-        console.error("acceptInvite update err:", uerr);
-      }
+    // avoid double-processing the same invite
+    setProcessingInviteIds((prev) => new Set(prev).add(inviteId));
 
-      // ensure both users exist
-      await ensureUserId(session.user.id);
-      await ensureUserId(senderId);
+    try {
+      // mark accepted
+      const { error: uerr } = await supabase.from("invites").update({ status: "accepted" }).eq("id", inviteId);
+      if (uerr) console.error("acceptInvite update err:", uerr);
 
       // find or create chat and open it
-      const chat = await getOrCreateChatWith(senderId);
-      if (chat) {
-        // fetch participantsInfo for the chat (usernames)
-        const { data: profiles } = await supabase.from("profiles").select("id, username").in("id", chat.participants || []);
-        const chatWithInfo = { ...chat, participantsInfo: profiles || [] };
-        setActiveChat(chatWithInfo);
-        // The messages effect will load messages and subscribe
+      const chat = await getOrCreateChatWith(senderId, senderName || undefined);
+
+      if (!chat) {
+        // if chat couldn't be created, show error and refresh invites back
+        alert("Accepted invite but failed to create or find chat. See console.");
+        await loadInvites();
+        setProcessingInviteIds((prev) => {
+          const s = new Set(prev);
+          s.delete(inviteId);
+          return s;
+        });
+        return;
       }
 
-      await loadInvites();
+      // fetch participants info to include usernames then set active
+      const { data: profiles } = await supabase.from("profiles").select("id, username").in("id", chat.participants || []);
+      const chatWithInfo = { ...chat, participantsInfo: profiles || [] };
+
+      // set the active chat so the UI opens it immediately
+      setActiveChat(chatWithInfo);
+
+      // messages effect handles loading messages/subscriptions
+      await loadInvites(); // refresh invites list
+      await loadChats(); // ensure chat list includes newly created chat
     } catch (err) {
       console.error("acceptInvite err:", err);
       alert("Failed to accept invite. See console.");
+    } finally {
+      setProcessingInviteIds((prev) => {
+        const s = new Set(prev);
+        s.delete(inviteId);
+        return s;
+      });
     }
   }
 
@@ -442,7 +461,6 @@ export default function App() {
 
         {/* Content */}
         <div className="p-4">
-          {/* Chat list or active chat */}
           {!activeChat ? (
             <div>
               <div className="space-y-3">
@@ -450,7 +468,6 @@ export default function App() {
                 {!loadingChats && chats.length === 0 && <div className="text-sm text-gray-500">No chats yet. Click + to add a contact.</div>}
                 {chats.map((chat) => (
                   <div key={chat.id} onClick={async () => {
-                    // fetch participants info (if missing) then open
                     const { data: profiles } = await supabase.from("profiles").select("id, username").in("id", chat.participants || []);
                     setActiveChat({ ...chat, participantsInfo: profiles || [] });
                   }} className="p-3 rounded-xl bg-gray-800 hover:bg-gray-700 cursor-pointer">
@@ -477,6 +494,7 @@ export default function App() {
           <div className="relative w-96 bg-gray-900 rounded-2xl p-6 border border-gray-800">
             <AddContactPanel
               invites={invites}
+              processingInviteIds={processingInviteIds}
               onClose={() => {
                 setShowAddContact(false);
                 loadInvites();
@@ -533,7 +551,7 @@ function ChatWindow({ chat, messages, onBack, onSend }) {
           if (e.key === "Enter") {
             const v = text.trim();
             if (!v) return;
-            onSend(chat.id, v).catch(() => { /* error handled inside sendMessage */ });
+            onSend(chat.id, v).catch(() => {});
             setText("");
           }
         }} className="flex-1 p-3 bg-gray-800 rounded-xl text-sm text-gray-200" placeholder="Type a message..." />
@@ -557,7 +575,7 @@ function MessageBubble({ msg }) {
   );
 }
 
-function AddContactPanel({ onClose, onSendInvite, invites, onAccept, onDeny, onRefresh }) {
+function AddContactPanel({ onClose, onSendInvite, invites = [], onAccept, onDeny, onRefresh, processingInviteIds }) {
   const [username, setUsername] = useState("");
 
   return (
@@ -574,14 +592,20 @@ function AddContactPanel({ onClose, onSendInvite, invites, onAccept, onDeny, onR
       <div className="mt-6">
         <h4 className="text-sm font-semibold mb-2">Invites</h4>
         <div className="space-y-2 max-h-48 overflow-auto pr-2">
-          {!invites || invites.length === 0 ? (
+          {(!invites || invites.length === 0) ? (
             <div className="text-sm text-gray-400">No invites</div>
           ) : (
             invites.map(inv => (
               <div key={inv.id} className="flex items-center justify-between bg-gray-800 p-2 rounded">
                 <div className="text-sm text-gray-200">{inv.senderName}</div>
                 <div className="space-x-2">
-                  <button onClick={() => onAccept(inv.id, inv.sender_id)} className="px-2 py-1 bg-gray-600 rounded text-sm">Accept</button>
+                  <button
+                    onClick={() => onAccept(inv.id, inv.sender_id, inv.senderName)}
+                    className="px-2 py-1 bg-gray-600 rounded text-sm"
+                    disabled={processingInviteIds && processingInviteIds.has(inv.id)}
+                  >
+                    {processingInviteIds && processingInviteIds.has(inv.id) ? "Accepting..." : "Accept"}
+                  </button>
                   <button onClick={() => onDeny(inv.id)} className="px-2 py-1 bg-gray-600 rounded text-sm">Deny</button>
                 </div>
               </div>
