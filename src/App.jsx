@@ -1,13 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { Plus, ArrowLeft, Send } from 'lucide-react';
-import { createClient } from '@supabase/supabase-js';
+import { supabase } from './supabaseClient';
 
-// --- Supabase Setup ---
-const supabase = createClient(
-  "https://dipbxozosmqocghgclqm.supabase.co", // replace with your project URL
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRpcGJ4b3pvc21xb2NnaGdjbHFtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTYxMjUwODYsImV4cCI6MjA3MTcwMTA4Nn0.kJH6WtMK-EWuvoOAkVmMhgiYdTG7Ro7ghApMKWZgTLc" // replace with your anon key
-);
-
+// ------------------ MAIN APP ------------------
 export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [user, setUser] = useState(null);
@@ -17,7 +12,7 @@ export default function App() {
   const [invites, setInvites] = useState([]);
   const [showAddContact, setShowAddContact] = useState(false);
 
-  // --- Auth ---
+  // --- Supabase Auth ---
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
       if (data.session) {
@@ -50,8 +45,7 @@ export default function App() {
       .from('chats')
       .select('id, name, participants')
       .contains('participants', [user.id]);
-
-    if (!error && data) setChats(data);
+    if (!error) setChats(data);
   }
 
   // --- Load Invites ---
@@ -59,20 +53,14 @@ export default function App() {
     if (!user) return;
     const { data, error } = await supabase
       .from('invites')
-      .select(`
-        id,
-        sender_id,
-        recipient_id,
-        status,
-        profiles:sender_id(username)
-      `)
+      .select(`id, sender:sender_id(username), recipient_id, status`)
       .eq('recipient_id', user.id)
       .eq('status', 'pending');
 
-    if (!error && data) setInvites(data);
+    if (!error) setInvites(data);
   }
 
-  // --- Messages ---
+  // --- Load Messages ---
   useEffect(() => {
     if (!activeChat) return;
 
@@ -82,22 +70,17 @@ export default function App() {
         .select('*')
         .eq('chat_id', activeChat.id)
         .order('created_at', { ascending: true });
-
-      if (!error && data) setMessages(data);
+      if (!error) setMessages(data);
     }
-
     fetchMessages();
 
     const channel = supabase
       .channel('room:' + activeChat.id)
-      .on('postgres_changes', {
-        event: 'INSERT',
-        schema: 'public',
-        table: 'messages',
-        filter: `chat_id=eq.${activeChat.id}`,
-      }, (payload) => {
-        setMessages((prev) => [...prev, payload.new]);
-      })
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'messages', filter: `chat_id=eq.${activeChat.id}` },
+        (payload) => setMessages((prev) => [...prev, payload.new])
+      )
       .subscribe();
 
     return () => {
@@ -105,6 +88,7 @@ export default function App() {
     };
   }, [activeChat]);
 
+  // --- Send Message ---
   async function handleSendMessage(text) {
     if (!text.trim()) return;
     await supabase.from('messages').insert({
@@ -116,28 +100,26 @@ export default function App() {
 
   // --- Add Contact (send invite) ---
   async function handleAddContact(username) {
-    if (!username.trim()) return;
-
-    const { data: contact, error } = await supabase
+    const { data: contact } = await supabase
       .from('profiles')
       .select('id, username')
       .eq('username', username)
       .single();
 
-    if (error || !contact) {
-      alert("User not found.");
+    if (!contact) {
+      alert('User not found.');
       return;
     }
 
-    const { error: inviteError } = await supabase.from('invites').insert({
+    const { error } = await supabase.from('invites').insert({
       sender_id: user.id,
       recipient_id: contact.id,
-      status: 'pending'
+      status: 'pending',
     });
 
-    if (inviteError) {
-      console.error(inviteError);
-      alert("Error sending invite.");
+    if (error) {
+      console.error(error);
+      alert('Error sending invite.');
     } else {
       alert(`Invite sent to ${username}!`);
     }
@@ -145,87 +127,77 @@ export default function App() {
   }
 
   // --- Accept Invite ---
-  async function handleAcceptInvite(invite) {
-    const { error: chatError } = await supabase.from('chats').insert({
-      name: invite.profiles.username,
-      participants: [invite.sender_id, invite.recipient_id],
+  async function handleAcceptInvite(inviteId, senderId) {
+    await supabase.from('invites').update({ status: 'accepted' }).eq('id', inviteId);
+    await supabase.from('chats').insert({
+      participants: [user.id, senderId],
+      name: `Chat with ${senderId}`,
     });
-
-    if (!chatError) {
-      await supabase.from('invites').delete().eq('id', invite.id);
-      loadChats();
-      loadInvites();
-    }
+    loadChats();
+    loadInvites();
   }
 
   // --- Deny Invite ---
   async function handleDenyInvite(inviteId) {
-    await supabase.from('invites').delete().eq('id', inviteId);
+    await supabase.from('invites').update({ status: 'denied' }).eq('id', inviteId);
     loadInvites();
   }
 
   // --- Magic Link Login ---
   async function handleLogin(email) {
     if (!email) {
-      alert("Please enter a valid email");
+      alert('Please enter a valid email');
       return;
     }
 
     const { error } = await supabase.auth.signInWithOtp({
       email,
-      options: { emailRedirectTo: `${window.location.origin}/auth/callback` }
+      options: { emailRedirectTo: `${window.location.origin}/auth/callback` },
     });
 
     if (error) {
       console.error(error);
-      alert("Error sending magic link: " + error.message);
+      alert('Error sending magic link: ' + error.message);
     } else {
-      alert("Check your email for a magic link from Vaulted ✉️");
+      alert('Check your email for a magic link from Vaulted ✉️');
     }
   }
 
-  // --- Auth Callback ---
+  // --- Auth Callback Handler ---
   useEffect(() => {
     const hash = window.location.hash;
-    if (hash.includes("access_token")) {
+    if (hash.includes('access_token')) {
       supabase.auth.getSession().then(({ data }) => {
         if (data.session) {
           setUser(data.session.user);
           setIsLoggedIn(true);
           loadChats();
           loadInvites();
-          window.history.replaceState({}, document.title, "/");
+          window.history.replaceState({}, document.title, '/');
         }
       });
     }
   }, []);
 
+  // --- RENDER ---
   const renderContent = () => {
-    if (!isLoggedIn) return <AuthScreen onLogin={handleLogin} />;
+    if (!isLoggedIn) {
+      return <AuthScreen onLogin={handleLogin} />;
+    }
 
     if (showAddContact) {
-      return (
-        <AddContactOverlay
-          onAdd={handleAddContact}
-          onClose={() => setShowAddContact(false)}
-          invites={invites}
-          onAccept={handleAcceptInvite}
-          onDeny={handleDenyInvite}
-        />
-      );
+      return <AddContactOverlay onAdd={handleAddContact} onClose={() => setShowAddContact(false)} />;
     }
 
     if (!activeChat) {
       return (
-        <div className="flex flex-col h-full">
+        <div>
           <ChatListHeader onAddContact={() => setShowAddContact(true)} />
-          <div className="p-4 space-y-2 flex-1 min-h-[300px]">
-            {chats.map(chat => (
+          <div className="p-4 space-y-2">
+            {chats.map((chat) => (
               <ChatListItem key={chat.id} chat={chat} onClick={() => setActiveChat(chat)} />
             ))}
-            {chats.length === 0 && (
-              <p className="text-gray-500 text-center">No chats yet. Add a contact to start chatting.</p>
-            )}
+            <InviteList invites={invites} onAccept={handleAcceptInvite} onDeny={handleDenyInvite} />
           </div>
         </div>
       );
@@ -246,14 +218,14 @@ export default function App() {
 
   return (
     <div className="bg-black text-gray-400 min-h-screen flex items-center justify-center font-sans p-4 antialiased">
-      <div className="w-full max-w-lg min-h-[400px] mx-auto bg-gray-900 rounded-3xl overflow-hidden shadow-2xl ring-2 ring-gray-600">
+      <div className="w-full max-w-lg min-h-[500px] mx-auto bg-gray-900 rounded-3xl overflow-hidden shadow-2xl ring-2 ring-gray-600">
         {renderContent()}
       </div>
     </div>
   );
 }
 
-// --- Components ---
+// ------------------ COMPONENTS ------------------
 
 const ChatListHeader = ({ onAddContact }) => (
   <div className="bg-black/80 p-4 flex items-center justify-between border-b border-gray-600">
@@ -263,11 +235,16 @@ const ChatListHeader = ({ onAddContact }) => (
 );
 
 const ChatListItem = ({ chat, onClick }) => (
-  <div onClick={onClick} className="flex items-center space-x-4 p-4 rounded-xl cursor-pointer hover:bg-gray-800">
+  <div
+    onClick={onClick}
+    className="flex items-center space-x-4 p-4 rounded-xl cursor-pointer hover:bg-gray-800"
+  >
     <div className="w-12 h-12 rounded-full bg-gray-600 flex items-center justify-center">
       <span className="font-bold text-sm text-black">{chat.name[0]}</span>
     </div>
-    <h2 className="text-gray-200 text-md font-semibold">{chat.name}</h2>
+    <div className="flex-1">
+      <h2 className="text-gray-200 text-md font-semibold">{chat.name}</h2>
+    </div>
   </div>
 );
 
@@ -281,7 +258,11 @@ const ChatViewHeader = ({ chat, onBack }) => (
 const Message = ({ msg, userId }) => {
   const isMine = msg.sender_id === userId;
   return (
-    <div className={`p-3 rounded-2xl max-w-[75%] ${isMine ? 'bg-gray-700 self-end' : 'bg-gray-800 self-start'}`}>
+    <div
+      className={`p-3 rounded-2xl max-w-[75%] ${
+        isMine ? 'bg-gray-700 self-end' : 'bg-gray-800 self-start'
+      }`}
+    >
       <p>{msg.text}</p>
     </div>
   );
@@ -329,14 +310,18 @@ const AuthScreen = ({ onLogin }) => {
         placeholder="you@email.com"
         required
       />
-      <button type="submit" disabled={loading} className="p-3 bg-gray-600 text-black rounded-xl disabled:opacity-50">
-        {loading ? "Sending..." : "Send Magic Link"}
+      <button
+        type="submit"
+        disabled={loading}
+        className="p-3 bg-gray-600 text-black rounded-xl disabled:opacity-50"
+      >
+        {loading ? 'Sending...' : 'Send Magic Link'}
       </button>
     </form>
   );
 };
 
-const AddContactOverlay = ({ onAdd, onClose, invites, onAccept, onDeny }) => {
+const AddContactOverlay = ({ onAdd, onClose }) => {
   const [username, setUsername] = useState('');
   return (
     <div className="p-8 flex flex-col space-y-4">
@@ -347,19 +332,37 @@ const AddContactOverlay = ({ onAdd, onClose, invites, onAccept, onDeny }) => {
         className="p-3 bg-gray-800/50 rounded-xl text-sm text-gray-200"
         placeholder="username"
       />
-      <button onClick={() => onAdd(username)} className="p-3 bg-gray-600 text-black rounded-xl">Add</button>
-      <h3 className="text-md font-semibold mt-4">Invites</h3>
-      {invites.length === 0 && <p className="text-gray-500 text-sm">No invites</p>}
-      {invites.map(invite => (
-        <div key={invite.id} className="flex items-center justify-between bg-gray-800/50 p-2 rounded-lg">
-          <span>{invite.profiles.username}</span>
-          <div className="space-x-2">
-            <button onClick={() => onAccept(invite)} className="px-2 py-1 bg-gray-600 text-black rounded">Accept</button>
-            <button onClick={() => onDeny(invite.id)} className="px-2 py-1 bg-gray-600 text-black rounded">Deny</button>
-          </div>
-        </div>
-      ))}
+      <button
+        onClick={() => onAdd(username)}
+        className="p-3 bg-gray-600 text-black rounded-xl"
+      >
+        Add
+      </button>
       <button onClick={onClose} className="text-gray-400">Cancel</button>
     </div>
   );
 };
+
+const InviteList = ({ invites, onAccept, onDeny }) => (
+  <div className="space-y-2 mt-4">
+    {invites.map((invite) => (
+      <div key={invite.id} className="flex items-center justify-between p-2 bg-gray-800 rounded-xl">
+        <span>{invite.sender?.username}</span>
+        <div className="space-x-2">
+          <button
+            onClick={() => onAccept(invite.id, invite.sender.id)}
+            className="px-2 py-1 bg-gray-600 text-black rounded-md text-sm"
+          >
+            Accept
+          </button>
+          <button
+            onClick={() => onDeny(invite.id)}
+            className="px-2 py-1 bg-gray-700 text-gray-200 rounded-md text-sm"
+          >
+            Deny
+          </button>
+        </div>
+      </div>
+    ))}
+  </div>
+);
