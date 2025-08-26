@@ -1,13 +1,16 @@
-import { createClient } from '@supabase/supabase-js';
+// src/supabaseClient.js
+import { createClient } from "@supabase/supabase-js";
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
-// Fail fast if envs are missing in Vercel
-if (!supabaseUrl || !supabaseAnonKey) {
-  // This throws only at runtime; Vite will still build
-  console.warn('Missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY');
+if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+  console.warn(
+    "Missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY. Add them to your environment."
+  );
 }
 
-const supabase = createClient(supabaseUrl, supabaseAnonKey);
+export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+// keep default export for modules expecting default import
 export default supabase;
