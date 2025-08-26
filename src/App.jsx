@@ -1,142 +1,87 @@
-import React, { useEffect, useState } from 'react';
-import { BrowserRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom';
-import supabase from './supabaseClient';
+// src/App.jsx
+import React, { useEffect, useState } from "react";
+import { Routes, Route, Link, useNavigate } from "react-router-dom";
+import supabase from "./supabaseClient"; // default export available
+import AuthCallback from "./AuthCallback.jsx";
+import Contacts from "./components/contacts.jsx";
+import Chat from "./components/chat.jsx";
+import Profile from "./components/profile.jsx";
+import Settings from "./settings.jsx";
 
-// IMPORTANT: these paths MUST match your filenames exactly as in GitHub
-import Chat from './components/chat.jsx';
-import Contacts from './components/contacts.jsx';
-import Profile from './components/profile.jsx';
-import Settings from './components/settings.jsx';
-import AuthCallback from './components/AuthCallback.jsx';
+/**
+ * App.jsx
+ * - top-level auth handling
+ * - simple nav
+ */
 
-// ---------- Auth Gate ----------
-function AuthGate({ children }) {
-  const [ready, setReady] = useState(false);
+export default function App() {
   const [session, setSession] = useState(null);
+  const navigate = useNavigate();
 
   useEffect(() => {
+    // initialize current session
     let mounted = true;
+    (async () => {
+      try {
+        const { data } = await supabase.auth.getSession();
+        if (!mounted) return;
+        setSession(data?.session ?? null);
+      } catch (e) {
+        console.warn("getSession error", e);
+      }
+    })();
 
-    supabase.auth.getSession().then(({ data }) => {
-      if (!mounted) return;
-      setSession(data.session ?? null);
-      setReady(true);
-    });
-
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => {
-      setSession(s ?? null);
+    // subscribe to auth changes
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+      // redirect on sign-in
+      if (session) navigate("/");
     });
 
     return () => {
       mounted = false;
-      sub?.subscription?.unsubscribe?.();
+      subscription?.unsubscribe();
     };
-  }, []);
+  }, [navigate]);
 
-  if (!ready) return null; // simple splash; optional spinner
-
-  return session ? children : <LoginScreen />;
-}
-
-// ---------- Login Screen (magic link) ----------
-function LoginScreen() {
-  const [email, setEmail] = useState('');
-  const [sending, setSending] = useState(false);
-
-  async function sendLink(e) {
-    e.preventDefault();
-    if (!email) return;
-    setSending(true);
-
-    try {
-      const redirect = `${window.location.origin}/auth/callback`;
-      const { error } = await supabase.auth.signInWithOtp({
-        email,
-        options: { emailRedirectTo: redirect }
-      });
-      if (error) {
-        alert(`Error sending magic link: ${error.message}`);
-      } else {
-        alert('Check your email for a magic link ✉️');
-      }
-    } catch (err) {
-      alert(`Error sending magic link: ${err.message || err}`);
-    } finally {
-      setSending(false);
-    }
+  async function signOut() {
+    await supabase.auth.signOut();
+    setSession(null);
+    navigate("/");
   }
 
   return (
-    <div className="min-h-screen bg-black flex items-center justify-center">
-      <form
-        onSubmit={sendLink}
-        className="w-full max-w-md rounded-2xl bg-[#0f172a] p-8 text-center shadow-xl"
-        style={{ border: '1px solid rgba(255,255,255,0.08)' }}
-      >
-        <div className="mx-auto mb-4 h-14 w-14 rounded-full bg-gray-700 flex items-center justify-center text-xl font-bold text-black">
-          V
+    <div className="app-root">
+      <header className="topbar">
+        <div className="left">
+          <Link to="/" className="brand">Vaulted</Link>
         </div>
-        <h1 className="text-white text-xl font-semibold">Welcome to Vaulted</h1>
-        <p className="text-gray-400 text-sm mt-1">Enter your email to get a magic link login.</p>
+        <div className="right">
+          {session?.user ? (
+            <>
+              <span className="user-email">{session.user.email}</span>
+              <button onClick={() => navigate("/profile")}>Profile</button>
+              <button onClick={signOut}>Sign out</button>
+            </>
+          ) : (
+            <button onClick={() => navigate("/")}>Sign in</button>
+          )}
+        </div>
+      </header>
 
-        <input
-          type="email"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          placeholder="you@email.com"
-          required
-          className="mt-5 w-full rounded-xl bg-[#111827] text-white px-4 py-3 outline-none"
-        />
-
-        <button
-          type="submit"
-          disabled={sending}
-          className="mt-4 w-full rounded-xl bg-gray-400/20 text-white px-4 py-3 disabled:opacity-60"
-        >
-          {sending ? 'Sending…' : 'Send Magic Link'}
-        </button>
-      </form>
+      <main>
+        <Routes>
+          <Route path="/" element={<Contacts session={session} />} />
+          <Route path="/auth/callback" element={<AuthCallback />} />
+          <Route path="/chat/:chatId" element={<Chat session={session} />} />
+          <Route path="/profile" element={<Profile session={session} />} />
+          <Route path="/settings" element={<Settings session={session} />} />
+          {/* fallback */}
+          <Route path="*" element={<div>Not Found</div>} />
+        </Routes>
+      </main>
     </div>
-  );
-}
-
-// ---------- Shell with routes ----------
-function AppShell() {
-  const navigate = useNavigate();
-
-  return (
-    <div className="min-h-screen bg-black text-white">
-      {/* You can put a global header here if you want */}
-      <Routes>
-        {/* Auth callback MUST be a top-level route */}
-        <Route path="/auth/callback" element={<AuthCallback />} />
-
-        {/* Protected area */}
-        <Route
-          path="/*"
-          element={
-            <AuthGate>
-              <Routes>
-                <Route path="/" element={<Contacts />} />
-                <Route path="/chat/:chatId" element={<Chat />} />
-                <Route path="/profile/:userId" element={<Profile />} />
-                <Route path="/settings" element={<Settings />} />
-                {/* fallback */}
-                <Route path="*" element={<Navigate to="/" replace />} />
-              </Routes>
-            </AuthGate>
-          }
-        />
-      </Routes>
-    </div>
-  );
-}
-
-// ---------- Root (with BrowserRouter) ----------
-export default function App() {
-  return (
-    <BrowserRouter>
-      <AppShell />
-    </BrowserRouter>
   );
 }
