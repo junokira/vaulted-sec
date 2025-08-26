@@ -1,288 +1,231 @@
-import React, { useState, useEffect } from 'react';
-import { Plus, ArrowLeft, Send } from 'lucide-react';
-import { createClient } from '@supabase/supabase-js';
-
-// --- Supabase Setup ---
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
-const supabase = createClient(supabaseUrl, supabaseAnonKey);
+import React, { useEffect, useState } from "react";
+import { supabase } from "./supabaseClient";
 
 export default function App() {
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [user, setUser] = useState(null);
-  const [activeChat, setActiveChat] = useState(null);
-  const [messages, setMessages] = useState([]);
+  const [session, setSession] = useState(null);
   const [chats, setChats] = useState([]);
   const [invites, setInvites] = useState([]);
-  const [showAddContact, setShowAddContact] = useState(false);
+  const [usernameInput, setUsernameInput] = useState("");
+  const [showModal, setShowModal] = useState(false);
 
-  // --- Auth ---
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => {
-      if (data.session) {
-        setUser(data.session.user);
-        setIsLoggedIn(true);
-        loadChats();
-        loadInvites();
-      }
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
     });
-
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (session) {
-        setUser(session.user);
-        setIsLoggedIn(true);
-        loadChats();
-        loadInvites();
-      } else {
-        setUser(null);
-        setIsLoggedIn(false);
-      }
+    supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
     });
-
-    return () => listener?.subscription.unsubscribe();
   }, []);
 
-  // --- Load Chats ---
-  async function loadChats() {
-    if (!user) return;
-    const { data, error } = await supabase
-      .from('chats')
-      .select('*')
-      .contains('participants', [user.id]);
-    if (!error) setChats(data || []);
-  }
-
-  // --- Load Invites ---
-  async function loadInvites() {
-    if (!user) return;
-    const { data, error } = await supabase
-      .from('invites')
-      .select('id, sender:sender_id(username), status')
-      .eq('recipient_id', user.id)
-      .eq('status', 'pending');
-    if (!error) setInvites(data || []);
-  }
-
-  // --- Load Messages ---
   useEffect(() => {
-    if (!activeChat) return;
-
-    async function fetchMessages() {
-      const { data, error } = await supabase
-        .from('messages')
-        .select('*')
-        .eq('chat_id', activeChat.id)
-        .order('created_at', { ascending: true });
-      if (!error) setMessages(data || []);
+    if (session) {
+      fetchChats();
+      fetchInvites();
     }
-    fetchMessages();
+  }, [session]);
 
-    const channel = supabase
-      .channel('room:' + activeChat.id)
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `chat_id=eq.${activeChat.id}` }, (payload) => {
-        setMessages((prev) => [...prev, payload.new]);
-      })
-      .subscribe();
+  const fetchChats = async () => {
+    const { data, error } = await supabase
+      .from("chats")
+      .select("id, participants")
+      .contains("participants", [session.user.id]);
 
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [activeChat]);
-
-  // --- Send Message ---
-  async function handleSendMessage(text) {
-    if (!text.trim()) return;
-    await supabase.from('messages').insert({
-      chat_id: activeChat.id,
-      sender_id: user.id,
-      text,
-    });
-  }
-
-  // --- Add Contact (Send Invite) ---
-  async function handleAddContact(username) {
-    const { data: contact } = await supabase
-      .from('profiles')
-      .select('id, username')
-      .eq('username', username)
-      .single();
-
-    if (!contact) {
-      alert('User not found.');
+    if (error) {
+      console.error("Error fetching chats:", error);
       return;
     }
 
-    await supabase.from('invites').insert({
-      sender_id: user.id,
-      recipient_id: contact.id,
-      status: 'pending',
-    });
+    // fetch usernames for each participant
+    const chatsWithNames = await Promise.all(
+      (data || []).map(async (chat) => {
+        const { data: profiles } = await supabase
+          .from("profiles")
+          .select("id, username")
+          .in("id", chat.participants);
 
-    alert(`Invite sent to ${username}!`);
-    setShowAddContact(false);
-  }
-
-  // --- Accept Invite ---
-  async function handleAcceptInvite(invite) {
-    await supabase.from('invites').update({ status: 'accepted' }).eq('id', invite.id);
-    await supabase.from('chats').insert({
-      name: `Chat with ${invite.sender.username}`,
-      participants: [user.id, invite.sender.id],
-    });
-    loadChats();
-    loadInvites();
-  }
-
-  // --- Deny Invite ---
-  async function handleDenyInvite(invite) {
-    await supabase.from('invites').update({ status: 'denied' }).eq('id', invite.id);
-    loadInvites();
-  }
-
-  const renderContent = () => {
-    if (!isLoggedIn) {
-      return <AuthScreen onLogin={handleLogin} />;
-    }
-
-    if (showAddContact) {
-      return <AddContactOverlay onAdd={handleAddContact} onClose={() => setShowAddContact(false)} />;
-    }
-
-    if (!activeChat) {
-      return (
-        <div>
-          <ChatListHeader onAddContact={() => setShowAddContact(true)} />
-          <div className="p-4 space-y-2 min-h-[300px]">
-            {chats.map((chat) => (
-              <ChatListItem key={chat.id} chat={chat} onClick={() => setActiveChat(chat)} />
-            ))}
-
-            {invites.length > 0 && (
-              <div className="mt-6 space-y-2">
-                <h3 className="text-gray-400 text-sm">Invites</h3>
-                {invites.map((invite) => (
-                  <div key={invite.id} className="flex items-center justify-between bg-gray-800 p-3 rounded-xl">
-                    <span>{invite.sender.username}</span>
-                    <div className="space-x-2">
-                      <button onClick={() => handleAcceptInvite(invite)} className="px-2 py-1 bg-gray-600 text-black rounded">Accept</button>
-                      <button onClick={() => handleDenyInvite(invite)} className="px-2 py-1 bg-gray-700 text-gray-300 rounded">Deny</button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-      );
-    }
-
-    return (
-      <div className="flex flex-col h-full">
-        <ChatViewHeader chat={activeChat} onBack={() => setActiveChat(null)} />
-        <div className="flex-1 overflow-y-auto p-4 space-y-4 text-sm">
-          {messages.map((msg) => (
-            <Message key={msg.id} msg={msg} userId={user.id} />
-          ))}
-        </div>
-        <ChatInput onSend={handleSendMessage} />
-      </div>
+        return { ...chat, participantsInfo: profiles || [] };
+      })
     );
+
+    setChats(chatsWithNames);
   };
 
+  const fetchInvites = async () => {
+    const { data, error } = await supabase
+      .from("invites")
+      .select("id, sender_id, recipient_id, status")
+      .eq("recipient_id", session.user.id)
+      .eq("status", "pending");
+
+    if (error) {
+      console.error("Error fetching invites:", error);
+      return;
+    }
+
+    const invitesWithSenders = await Promise.all(
+      (data || []).map(async (invite) => {
+        const { data: senderProfile } = await supabase
+          .from("profiles")
+          .select("username")
+          .eq("id", invite.sender_id)
+          .single();
+        return { ...invite, senderName: senderProfile?.username || "Unknown" };
+      })
+    );
+
+    setInvites(invitesWithSenders);
+  };
+
+  const sendInvite = async () => {
+    if (!usernameInput) return;
+
+    const { data: recipient, error: userError } = await supabase
+      .from("profiles")
+      .select("id")
+      .eq("username", usernameInput)
+      .single();
+
+    if (userError || !recipient) {
+      alert("User not found.");
+      return;
+    }
+
+    const { error } = await supabase.from("invites").insert([
+      {
+        sender_id: session.user.id,
+        recipient_id: recipient.id,
+        status: "pending",
+      },
+    ]);
+
+    if (error) {
+      console.error("Error sending invite:", error);
+      alert("Error sending invite.");
+    } else {
+      alert(`Invite sent to ${usernameInput}!`);
+      setUsernameInput("");
+      fetchInvites();
+    }
+  };
+
+  const acceptInvite = async (inviteId, senderId) => {
+    // mark accepted
+    await supabase.from("invites").update({ status: "accepted" }).eq("id", inviteId);
+
+    // create chat
+    await supabase.from("chats").insert([
+      {
+        participants: [session.user.id, senderId],
+      },
+    ]);
+
+    fetchChats();
+    fetchInvites();
+  };
+
+  const denyInvite = async (inviteId) => {
+    await supabase.from("invites").update({ status: "denied" }).eq("id", inviteId);
+    fetchInvites();
+  };
+
+  if (!session) {
+    return (
+      <div className="flex items-center justify-center h-screen bg-black text-white">
+        <button
+          onClick={() => supabase.auth.signInWithOAuth({ provider: "github" })}
+          className="px-4 py-2 bg-gray-700 rounded-lg hover:bg-gray-600"
+        >
+          Sign In with GitHub
+        </button>
+      </div>
+    );
+  }
+
   return (
-    <div className="bg-black text-gray-400 min-h-screen flex items-center justify-center font-sans p-4 antialiased">
-      <div className="w-full max-w-lg mx-auto bg-gray-900 rounded-3xl overflow-hidden shadow-2xl ring-2 ring-gray-600">
-        {renderContent()}
+    <div className="flex items-center justify-center h-screen bg-black text-white">
+      <div className="w-96 p-4 bg-gray-900 rounded-2xl shadow-lg border border-gray-800">
+        <div className="flex justify-between items-center mb-4">
+          <h1 className="text-lg font-bold">Vaulted</h1>
+          <button
+            className="text-xl font-bold"
+            onClick={() => setShowModal(true)}
+          >
+            +
+          </button>
+        </div>
+
+        {/* Chat List */}
+        <div className="space-y-2">
+          {chats.map((chat) => (
+            <div
+              key={chat.id}
+              className="p-3 rounded-lg bg-gray-800 hover:bg-gray-700 cursor-pointer"
+            >
+              Chat with{" "}
+              {chat.participantsInfo
+                .filter((p) => p.id !== session.user.id)
+                .map((p) => p.username)
+                .join(", ") || "Unknown"}
+            </div>
+          ))}
+        </div>
+
+        {/* Modal */}
+        {showModal && (
+          <div className="mt-4 p-4 bg-gray-800 rounded-lg border border-gray-700">
+            <h2 className="text-sm font-semibold mb-2">Add Contact</h2>
+            <input
+              type="text"
+              placeholder="Enter username..."
+              value={usernameInput}
+              onChange={(e) => setUsernameInput(e.target.value)}
+              className="w-full p-2 rounded bg-gray-900 border border-gray-600 mb-2 text-white"
+            />
+            <button
+              onClick={sendInvite}
+              className="w-full py-2 bg-gray-700 rounded-lg hover:bg-gray-600"
+            >
+              Add
+            </button>
+
+            <h3 className="mt-4 text-sm font-semibold">Invites</h3>
+            <div className="space-y-2 mt-2">
+              {invites.length === 0 && (
+                <p className="text-gray-400 text-sm">No invites</p>
+              )}
+              {invites.map((invite) => (
+                <div
+                  key={invite.id}
+                  className="flex justify-between items-center p-2 bg-gray-700 rounded-lg"
+                >
+                  <span>{invite.senderName}</span>
+                  <div className="space-x-2">
+                    <button
+                      onClick={() => acceptInvite(invite.id, invite.sender_id)}
+                      className="px-2 py-1 bg-gray-600 rounded text-sm"
+                    >
+                      Accept
+                    </button>
+                    <button
+                      onClick={() => denyInvite(invite.id)}
+                      className="px-2 py-1 bg-gray-600 rounded text-sm"
+                    >
+                      Deny
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <button
+              onClick={() => setShowModal(false)}
+              className="mt-4 w-full py-2 bg-gray-700 rounded-lg hover:bg-gray-600"
+            >
+              Close
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
 }
-
-// --- Components ---
-const ChatListHeader = ({ onAddContact }) => (
-  <div className="bg-black/80 p-4 flex items-center justify-between border-b border-gray-600">
-    <h1 className="text-xl font-bold">Vaulted</h1>
-    <Plus className="w-5 h-5 cursor-pointer" onClick={onAddContact} />
-  </div>
-);
-
-const ChatListItem = ({ chat, onClick }) => (
-  <div onClick={onClick} className="flex items-center space-x-4 p-4 rounded-xl cursor-pointer hover:bg-gray-800">
-    <div className="w-12 h-12 rounded-full bg-gray-600 flex items-center justify-center">
-      <span className="font-bold text-sm text-black">{chat.name[0]}</span>
-    </div>
-    <div className="flex-1">
-      <h2 className="text-gray-200 text-md font-semibold">{chat.name}</h2>
-    </div>
-  </div>
-);
-
-const ChatViewHeader = ({ chat, onBack }) => (
-  <div className="bg-black/80 p-4 flex items-center border-b border-gray-600">
-    <ArrowLeft className="w-5 h-5 cursor-pointer" onClick={onBack} />
-    <h2 className="ml-4 text-md font-semibold">{chat.name}</h2>
-  </div>
-);
-
-const Message = ({ msg, userId }) => {
-  const isMine = msg.sender_id === userId;
-  return (
-    <div className={`p-3 rounded-2xl max-w-[75%] ${isMine ? 'bg-gray-700 self-end' : 'bg-gray-800 self-start'}`}>
-      <p>{msg.text}</p>
-    </div>
-  );
-};
-
-const ChatInput = ({ onSend }) => {
-  const [text, setText] = useState('');
-  return (
-    <div className="bg-black/80 p-4 flex items-center space-x-3 border-t border-gray-600">
-      <input
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        onKeyDown={(e) => e.key === 'Enter' && onSend(text) && setText('')}
-        className="flex-1 p-2 bg-gray-800/50 rounded-xl text-sm text-gray-200"
-        placeholder="Message..."
-      />
-      <Send className="w-5 h-5 cursor-pointer" onClick={() => { onSend(text); setText(''); }} />
-    </div>
-  );
-};
-
-const AuthScreen = ({ onLogin }) => {
-  const [email, setEmail] = useState('');
-  const [loading, setLoading] = useState(false);
-
-  async function handleSubmit(e) {
-    e.preventDefault();
-    setLoading(true);
-    await onLogin(email);
-    setLoading(false);
-  }
-
-  return (
-    <form onSubmit={handleSubmit} className="p-8 flex flex-col space-y-4 text-center">
-      <div className="w-16 h-16 rounded-full bg-gray-600 flex items-center justify-center mx-auto">
-        <span className="font-bold text-lg text-black">V</span>
-      </div>
-      <h2 className="text-xl font-bold">Welcome to Vaulted</h2>
-      <p className="text-sm text-gray-500">Enter your email to get a magic link login.</p>
-      <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} className="p-3 bg-gray-800/50 rounded-xl text-sm text-gray-200" placeholder="you@email.com" required />
-      <button type="submit" disabled={loading} className="p-3 bg-gray-600 text-black rounded-xl disabled:opacity-50">
-        {loading ? 'Sending...' : 'Send Magic Link'}
-      </button>
-    </form>
-  );
-};
-
-const AddContactOverlay = ({ onAdd, onClose }) => {
-  const [username, setUsername] = useState('');
-  return (
-    <div className="p-8 flex flex-col space-y-4">
-      <h2 className="text-md font-semibold">Add Contact</h2>
-      <input value={username} onChange={(e) => setUsername(e.target.value)} className="p-3 bg-gray-800/50 rounded-xl text-sm text-gray-200" placeholder="username" />
-      <button onClick={() => onAdd(username)} className="p-3 bg-gray-600 text-black rounded-xl">Add</button>
-      <button onClick={onClose} className="text-gray-400">Cancel</button>
-    </div>
-  );
-};
