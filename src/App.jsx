@@ -27,22 +27,53 @@ export default function App() {
   const fetchChats = async () => {
     const { data, error } = await supabase
       .from("chats")
-      .select("id, participants, profiles ( username )")
+      .select("id, participants")
       .contains("participants", [session.user.id]);
 
-    if (error) console.error("Error fetching chats:", error);
-    else setChats(data || []);
+    if (error) {
+      console.error("Error fetching chats:", error);
+      return;
+    }
+
+    // fetch usernames for each participant
+    const chatsWithNames = await Promise.all(
+      (data || []).map(async (chat) => {
+        const { data: profiles } = await supabase
+          .from("profiles")
+          .select("id, username")
+          .in("id", chat.participants);
+
+        return { ...chat, participantsInfo: profiles || [] };
+      })
+    );
+
+    setChats(chatsWithNames);
   };
 
   const fetchInvites = async () => {
     const { data, error } = await supabase
       .from("invites")
-      .select("id, sender_id, recipient_id, status, profiles!invites_sender_id_fkey(username)")
+      .select("id, sender_id, recipient_id, status")
       .eq("recipient_id", session.user.id)
       .eq("status", "pending");
 
-    if (error) console.error("Error fetching invites:", error);
-    else setInvites(data || []);
+    if (error) {
+      console.error("Error fetching invites:", error);
+      return;
+    }
+
+    const invitesWithSenders = await Promise.all(
+      (data || []).map(async (invite) => {
+        const { data: senderProfile } = await supabase
+          .from("profiles")
+          .select("username")
+          .eq("id", invite.sender_id)
+          .single();
+        return { ...invite, senderName: senderProfile?.username || "Unknown" };
+      })
+    );
+
+    setInvites(invitesWithSenders);
   };
 
   const sendInvite = async () => {
@@ -78,41 +109,22 @@ export default function App() {
   };
 
   const acceptInvite = async (inviteId, senderId) => {
-    // 1. Mark invite accepted
-    const { error: updateError } = await supabase
-      .from("invites")
-      .update({ status: "accepted" })
-      .eq("id", inviteId);
+    // mark accepted
+    await supabase.from("invites").update({ status: "accepted" }).eq("id", inviteId);
 
-    if (updateError) {
-      console.error("Error accepting invite:", updateError);
-      return;
-    }
-
-    // 2. Create chat with both participants
-    const { error: chatError } = await supabase.from("chats").insert([
+    // create chat
+    await supabase.from("chats").insert([
       {
         participants: [session.user.id, senderId],
       },
     ]);
 
-    if (chatError) {
-      console.error("Error creating chat:", chatError);
-      return;
-    }
-
-    // Refresh lists
     fetchChats();
     fetchInvites();
   };
 
   const denyInvite = async (inviteId) => {
-    const { error } = await supabase
-      .from("invites")
-      .update({ status: "denied" })
-      .eq("id", inviteId);
-
-    if (error) console.error("Error denying invite:", error);
+    await supabase.from("invites").update({ status: "denied" }).eq("id", inviteId);
     fetchInvites();
   };
 
@@ -121,7 +133,7 @@ export default function App() {
       <div className="flex items-center justify-center h-screen bg-black text-white">
         <button
           onClick={() => supabase.auth.signInWithOAuth({ provider: "github" })}
-          className="px-4 py-2 bg-blue-600 rounded-lg"
+          className="px-4 py-2 bg-gray-700 rounded-lg hover:bg-gray-600"
         >
           Sign In with GitHub
         </button>
@@ -149,7 +161,11 @@ export default function App() {
               key={chat.id}
               className="p-3 rounded-lg bg-gray-800 hover:bg-gray-700 cursor-pointer"
             >
-              Chat with {chat.participants.length - 1} others
+              Chat with{" "}
+              {chat.participantsInfo
+                .filter((p) => p.id !== session.user.id)
+                .map((p) => p.username)
+                .join(", ") || "Unknown"}
             </div>
           ))}
         </div>
@@ -167,7 +183,7 @@ export default function App() {
             />
             <button
               onClick={sendInvite}
-              className="w-full py-2 bg-blue-600 rounded-lg hover:bg-blue-500"
+              className="w-full py-2 bg-gray-700 rounded-lg hover:bg-gray-600"
             >
               Add
             </button>
@@ -182,17 +198,17 @@ export default function App() {
                   key={invite.id}
                   className="flex justify-between items-center p-2 bg-gray-700 rounded-lg"
                 >
-                  <span>{invite.profiles?.username || "Unknown"}</span>
+                  <span>{invite.senderName}</span>
                   <div className="space-x-2">
                     <button
                       onClick={() => acceptInvite(invite.id, invite.sender_id)}
-                      className="px-2 py-1 bg-green-600 rounded text-sm"
+                      className="px-2 py-1 bg-gray-600 rounded text-sm"
                     >
                       Accept
                     </button>
                     <button
                       onClick={() => denyInvite(invite.id)}
-                      className="px-2 py-1 bg-red-600 rounded text-sm"
+                      className="px-2 py-1 bg-gray-600 rounded text-sm"
                     >
                       Deny
                     </button>
