@@ -1,8 +1,15 @@
 // src/App.jsx
 import React, { useEffect, useState } from "react";
-import { Plus, ArrowLeft, Send, Trash2 } from "lucide-react";
+import {
+  Plus,
+  ArrowLeft,
+  Send,
+  MoreVertical,
+} from "lucide-react";
 import supabase from "./supabaseClient";
+import "./index.css";
 
+// --- Main App ---
 export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [user, setUser] = useState(null);
@@ -11,7 +18,7 @@ export default function App() {
   const [chats, setChats] = useState([]);
   const [showAddContact, setShowAddContact] = useState(false);
 
-  // --- Supabase Auth ---
+  // --- Auth + Session ---
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
       if (data.session) {
@@ -39,39 +46,12 @@ export default function App() {
 
   // --- Load Chats ---
   async function loadChats() {
-    if (!user) return;
-
-    const { data: chatsData, error } = await supabase
+    const { data, error } = await supabase
       .from("chats")
-      .select("*")
-      .contains("participants", [user.id]);
+      .select("*, users!chats_participants_fkey(username)")
+      .contains("participants", [user?.id]);
 
-    if (error) {
-      console.error("Error loading chats:", error);
-      return;
-    }
-
-    // Resolve usernames
-    const enrichedChats = await Promise.all(
-      chatsData.map(async (chat) => {
-        const otherId = chat.participants.find((id) => id !== user.id);
-
-        if (!otherId) return { ...chat, displayName: "Unknown" };
-
-        const { data: otherUser } = await supabase
-          .from("users")
-          .select("username")
-          .eq("id", otherId)
-          .single();
-
-        return {
-          ...chat,
-          displayName: otherUser?.username || "Unknown",
-        };
-      })
-    );
-
-    setChats(enrichedChats);
+    if (!error) setChats(data || []);
   }
 
   // --- Load Messages ---
@@ -81,15 +61,13 @@ export default function App() {
     async function fetchMessages() {
       const { data, error } = await supabase
         .from("messages")
-        .select("*")
+        .select("*, users!messages_sender_id_fkey(username)")
         .eq("chat_id", activeChat.id)
         .order("created_at", { ascending: true });
-
-      if (!error) setMessages(data);
+      if (!error) setMessages(data || []);
     }
     fetchMessages();
 
-    // Realtime subscription
     const channel = supabase
       .channel("room:" + activeChat.id)
       .on(
@@ -123,58 +101,69 @@ export default function App() {
 
   // --- Add Contact ---
   async function handleAddContact(username) {
-    if (!user) return;
-
-    const { data: contact, error } = await supabase
+    const { data: contact } = await supabase
       .from("users")
       .select("id, username")
       .eq("username", username)
       .single();
 
-    if (error || !contact) {
-      alert("User not found.");
-      return;
+    if (contact) {
+      const { data } = await supabase
+        .from("chats")
+        .insert({
+          name: username,
+          participants: [user.id, contact.id],
+        })
+        .select()
+        .single();
+      setChats([data, ...chats]);
     }
-
-    const { data: existingChats } = await supabase
-      .from("chats")
-      .select("*")
-      .contains("participants", [user.id])
-      .contains("participants", [contact.id]);
-
-    if (existingChats?.length > 0) {
-      alert("Chat already exists.");
-      return;
-    }
-
-    const { data: newChat, error: chatErr } = await supabase
-      .from("chats")
-      .insert({
-        participants: [user.id, contact.id],
-      })
-      .select()
-      .single();
-
-    if (chatErr) {
-      console.error(chatErr);
-      alert("Error creating chat.");
-      return;
-    }
-
-    setChats([newChat, ...chats]);
     setShowAddContact(false);
   }
 
   // --- Delete Chat ---
   async function deleteChat(chatId) {
-    const { error } = await supabase.from("chats").delete().eq("id", chatId);
+    await supabase.from("chats").delete().eq("id", chatId);
+    setChats((prev) => prev.filter((c) => c.id !== chatId));
+    if (activeChat?.id === chatId) setActiveChat(null);
+  }
+
+  // --- Magic Link Login ---
+  async function handleLogin(email) {
+    if (!email) {
+      alert("Please enter a valid email");
+      return;
+    }
+
+    const { error } = await supabase.auth.signInWithOtp({
+      email,
+      options: {
+        emailRedirectTo: `${window.location.origin}/auth/callback`,
+      },
+    });
+
     if (error) {
-      console.error("Error deleting chat:", error);
+      console.error(error);
+      alert("Error sending magic link: " + error.message);
     } else {
-      setChats((prev) => prev.filter((c) => c.id !== chatId));
-      setActiveChat(null);
+      alert("Check your email for a magic link from Vaulted ✉️");
     }
   }
+
+  // --- Auth Callback Handler ---
+  useEffect(() => {
+    const hash = window.location.hash;
+    if (hash.includes("access_token")) {
+      supabase.auth.getSession().then(({ data }) => {
+        if (data.session) {
+          setUser(data.session.user);
+          setIsLoggedIn(true);
+          loadChats();
+          window.history.replaceState({}, document.title, "/");
+        }
+      });
+    }
+  }, []);
 
   const renderContent = () => {
     if (!isLoggedIn) {
@@ -194,6 +183,10 @@ export default function App() {
       return (
         <div>
           <ChatListHeader onAddContact={() => setShowAddContact(true)} />
+
+          {/* Invites */}
+          <InviteList userId={user.id} />
+
           <div className="p-4 space-y-2">
             {chats.map((chat) => (
               <ChatListItem
@@ -210,11 +203,8 @@ export default function App() {
 
     return (
       <div className="flex flex-col h-full">
-        <ChatViewHeader
-          chat={activeChat}
-          onBack={() => setActiveChat(null)}
-        />
-        <div className="flex-1 overflow-y-auto p-4 space-y-4 text-sm">
+        <ChatViewHeader chat={activeChat} onBack={() => setActiveChat(null)} />
+        <div className="flex-1 overflow-y-auto p-4 space-y-4 text-sm flex flex-col">
           {messages.map((msg) => (
             <Message key={msg.id} msg={msg} userId={user.id} />
           ))}
@@ -244,25 +234,23 @@ const ChatListHeader = ({ onAddContact }) => (
 
 const ChatListItem = ({ chat, onClick, onDelete }) => (
   <div
-    className="flex items-center space-x-4 p-4 rounded-xl cursor-pointer hover:bg-gray-800"
+    onClick={onClick}
+    className="flex items-center justify-between p-4 rounded-xl cursor-pointer hover:bg-gray-800"
   >
-    <div
-      className="flex-1 flex items-center space-x-4"
-      onClick={onClick}
-    >
+    <div className="flex items-center space-x-4">
       <div className="w-12 h-12 rounded-full bg-gray-600 flex items-center justify-center">
         <span className="font-bold text-sm text-black">
-          {chat.displayName ? chat.displayName[0] : "?"}
+          {chat.name?.[0] || "?"}
         </span>
       </div>
-      <div className="flex-1">
+      <div>
         <h2 className="text-gray-200 text-md font-semibold">
-          {chat.displayName || "Unknown"}
+          {chat.name || "Unknown"}
         </h2>
       </div>
     </div>
-    <Trash2
-      className="w-5 h-5 text-red-500 cursor-pointer"
+    <MoreVertical
+      className="w-5 h-5 text-gray-400 hover:text-red-400"
       onClick={(e) => {
         e.stopPropagation();
         onDelete();
@@ -274,9 +262,7 @@ const ChatListItem = ({ chat, onClick, onDelete }) => (
 const ChatViewHeader = ({ chat, onBack }) => (
   <div className="bg-black/80 p-4 flex items-center border-b border-gray-600">
     <ArrowLeft className="w-5 h-5 cursor-pointer" onClick={onBack} />
-    <h2 className="ml-4 text-md font-semibold cursor-pointer">
-      {chat.displayName}
-    </h2>
+    <h2 className="ml-4 text-md font-semibold">{chat.name}</h2>
   </div>
 );
 
@@ -284,17 +270,16 @@ const Message = ({ msg, userId }) => {
   const isMine = msg.sender_id === userId;
   return (
     <div
-      className={`flex ${
-        isMine ? "justify-end" : "justify-start"
+      className={`p-3 rounded-2xl max-w-[75%] ${
+        isMine
+          ? "bg-blue-600 text-white self-end"
+          : "bg-gray-700 text-gray-200 self-start"
       }`}
     >
-      <div
-        className={`p-3 rounded-2xl max-w-[75%] ${
-          isMine ? "bg-blue-600 text-white" : "bg-gray-700 text-white"
-        }`}
-      >
-        <p>{msg.text}</p>
-      </div>
+      <p className="text-xs font-semibold mb-1">
+        {msg.users?.username || (isMine ? "You" : "Unknown")}
+      </p>
+      <p>{msg.text}</p>
     </div>
   );
 };
@@ -306,12 +291,7 @@ const ChatInput = ({ onSend }) => {
       <input
         value={text}
         onChange={(e) => setText(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            onSend(text);
-            setText("");
-          }
-        }}
+        onKeyDown={(e) => e.key === "Enter" && onSend(text) && setText("")}
         className="flex-1 p-2 bg-gray-800/50 rounded-xl text-sm text-gray-200"
         placeholder="Message..."
       />
@@ -388,6 +368,58 @@ const AddContactOverlay = ({ onAdd, onClose }) => {
       <button onClick={onClose} className="text-gray-400">
         Cancel
       </button>
+    </div>
+  );
+};
+
+const InviteList = ({ userId }) => {
+  const [invites, setInvites] = useState([]);
+
+  useEffect(() => {
+    async function loadInvites() {
+      const { data } = await supabase
+        .from("invites")
+        .select("id, from_id, status, users!invites_from_id_fkey(username)")
+        .eq("to_id", userId)
+        .eq("status", "pending");
+
+      setInvites(data || []);
+    }
+    loadInvites();
+  }, [userId]);
+
+  async function handleInvite(id, action) {
+    await supabase.from("invites").update({ status: action }).eq("id", id);
+    setInvites((prev) => prev.filter((i) => i.id !== id));
+  }
+
+  if (invites.length === 0) return null;
+
+  return (
+    <div className="p-4 border-b border-gray-600">
+      <h2 className="text-gray-200 font-semibold mb-2">Invites</h2>
+      {invites.map((invite) => (
+        <div
+          key={invite.id}
+          className="flex justify-between items-center bg-gray-800 p-3 rounded-xl mb-2"
+        >
+          <span>{invite.users?.username || "Unknown User"}</span>
+          <div className="space-x-2">
+            <button
+              onClick={() => handleInvite(invite.id, "accepted")}
+              className="px-2 py-1 bg-green-600 text-white rounded"
+            >
+              Accept
+            </button>
+            <button
+              onClick={() => handleInvite(invite.id, "denied")}
+              className="px-2 py-1 bg-red-600 text-white rounded"
+            >
+              Deny
+            </button>
+          </div>
+        </div>
+      ))}
     </div>
   );
 };
