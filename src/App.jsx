@@ -1,12 +1,8 @@
 // src/App.jsx
-import React, { useEffect, useState } from "react";
-import { ArrowLeft, Plus, Send, Trash2 } from "lucide-react";
+import React, { useState, useEffect } from "react";
+import { Plus, ArrowLeft, Send, Trash2 } from "lucide-react";
 import supabase from "./supabaseClient";
-import "./index.css";
 
-// ============================
-// App.jsx (main entry point)
-// ============================
 export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [user, setUser] = useState(null);
@@ -15,7 +11,6 @@ export default function App() {
   const [chats, setChats] = useState([]);
   const [showAddContact, setShowAddContact] = useState(false);
   const [showProfile, setShowProfile] = useState(null);
-  const [unreadCounts, setUnreadCounts] = useState({}); // { chatId: count }
 
   // --- Supabase Auth ---
   useEffect(() => {
@@ -59,14 +54,10 @@ export default function App() {
         .select("*")
         .eq("chat_id", activeChat.id)
         .order("created_at", { ascending: true });
-      if (!error) {
-        setMessages(data);
-        setUnreadCounts((prev) => ({ ...prev, [activeChat.id]: 0 })); // reset unread
-      }
+      if (!error) setMessages(data);
     }
     fetchMessages();
 
-    // Realtime subscription
     const channel = supabase
       .channel("room:" + activeChat.id)
       .on(
@@ -78,12 +69,6 @@ export default function App() {
           filter: `chat_id=eq.${activeChat.id}`,
         },
         (payload) => {
-          if (payload.new.sender_id !== user.id) {
-            setUnreadCounts((prev) => ({
-              ...prev,
-              [activeChat.id]: (prev[activeChat.id] || 0) + 1,
-            }));
-          }
           setMessages((prev) => [...prev, payload.new]);
         }
       )
@@ -92,7 +77,7 @@ export default function App() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [activeChat, user]);
+  }, [activeChat]);
 
   // --- Send Message ---
   async function handleSendMessage(text) {
@@ -113,25 +98,42 @@ export default function App() {
       .single();
 
     if (contact) {
-      const { data } = await supabase
+      // check if chat already exists
+      const { data: existing } = await supabase
+        .from("chats")
+        .select("*")
+        .contains("participants", [user.id, contact.id])
+        .maybeSingle();
+
+      if (existing) {
+        setActiveChat(existing);
+        setShowAddContact(false);
+        return;
+      }
+
+      const { data, error } = await supabase
         .from("chats")
         .insert({
-          name: username,
           participants: [user.id, contact.id],
         })
         .select()
         .single();
-      setChats([data, ...chats]);
+
+      if (!error) setChats([data, ...chats]);
     }
     setShowAddContact(false);
   }
 
   // --- Delete Chat ---
   async function handleDeleteChat(chatId) {
-    await supabase.from("messages").delete().eq("chat_id", chatId);
-    await supabase.from("chats").delete().eq("id", chatId);
-    setChats(chats.filter((c) => c.id !== chatId));
-    setActiveChat(null);
+    const { error } = await supabase.from("chats").delete().eq("id", chatId);
+    if (error) {
+      console.error("Delete failed", error);
+      alert("Unable to delete chat: " + error.message);
+    } else {
+      setChats(chats.filter((c) => c.id !== chatId));
+      setActiveChat(null);
+    }
   }
 
   // --- Magic Link Login ---
@@ -143,9 +145,7 @@ export default function App() {
 
     const { error } = await supabase.auth.signInWithOtp({
       email,
-      options: {
-        emailRedirectTo: `${window.location.origin}/auth/callback`,
-      },
+      options: { emailRedirectTo: `${window.location.origin}/auth/callback` },
     });
 
     if (error) {
@@ -156,43 +156,26 @@ export default function App() {
     }
   }
 
-  // --- Auth Callback Handler ---
-  useEffect(() => {
-    const hash = window.location.hash;
-    if (hash.includes("access_token")) {
-      supabase.auth.getSession().then(({ data }) => {
-        if (data.session) {
-          setUser(data.session.user);
-          setIsLoggedIn(true);
-          loadChats();
-          window.history.replaceState({}, document.title, "/");
-        }
-      });
-    }
-  }, []);
-
-  // --- Render Content ---
   const renderContent = () => {
-    if (!isLoggedIn) {
-      return <AuthScreen onLogin={handleLogin} />;
-    }
+    if (!isLoggedIn) return <AuthScreen onLogin={handleLogin} />;
 
-    if (showAddContact) {
+    if (showAddContact)
       return (
         <AddContactOverlay
           onAdd={handleAddContact}
           onClose={() => setShowAddContact(false)}
         />
       );
-    }
 
-    if (showProfile) {
+    if (showProfile)
       return (
-        <ProfileOverlay userId={showProfile} onClose={() => setShowProfile(null)} />
+        <ProfileOverlay
+          userId={showProfile}
+          onClose={() => setShowProfile(null)}
+        />
       );
-    }
 
-    if (!activeChat) {
+    if (!activeChat)
       return (
         <div>
           <ChatListHeader onAddContact={() => setShowAddContact(true)} />
@@ -202,14 +185,12 @@ export default function App() {
                 key={chat.id}
                 chat={chat}
                 currentUser={user}
-                unread={unreadCounts[chat.id]}
                 onClick={() => setActiveChat(chat)}
               />
             ))}
           </div>
         </div>
       );
-    }
 
     return (
       <div className="flex flex-col h-full">
@@ -218,9 +199,9 @@ export default function App() {
           user={user}
           onBack={() => setActiveChat(null)}
           onDelete={handleDeleteChat}
-          onProfile={setShowProfile}
+          onProfile={(id) => setShowProfile(id)}
         />
-        <div className="flex-1 overflow-y-auto p-4 space-y-4 text-sm">
+        <div className="flex-1 overflow-y-auto p-4 space-y-4 text-sm flex flex-col">
           {messages.map((msg) => (
             <Message key={msg.id} msg={msg} userId={user.id} />
           ))}
@@ -239,9 +220,7 @@ export default function App() {
   );
 }
 
-// ============================
-// Components
-// ============================
+// --- Components ---
 
 const ChatListHeader = ({ onAddContact }) => (
   <div className="bg-black/80 p-4 flex items-center justify-between border-b border-gray-600">
@@ -250,22 +229,18 @@ const ChatListHeader = ({ onAddContact }) => (
   </div>
 );
 
-// ✅ FIX: Show other participant username + unread badge
-const ChatListItem = ({ chat, currentUser, unread, onClick }) => {
+const ChatListItem = ({ chat, currentUser, onClick }) => {
   const otherParticipant = chat.participants?.find((p) => p !== currentUser.id);
   const [otherUser, setOtherUser] = useState(null);
 
   useEffect(() => {
-    if (otherParticipant) {
-      supabase
-        .from("users")
-        .select("username")
-        .eq("id", otherParticipant)
-        .single()
-        .then(({ data }) => {
-          if (data) setOtherUser(data.username);
-        });
-    }
+    if (!otherParticipant) return;
+    supabase
+      .from("users")
+      .select("id, username")
+      .eq("id", otherParticipant)
+      .single()
+      .then(({ data }) => setOtherUser(data));
   }, [otherParticipant]);
 
   return (
@@ -275,17 +250,12 @@ const ChatListItem = ({ chat, currentUser, unread, onClick }) => {
     >
       <div className="w-12 h-12 rounded-full bg-gray-600 flex items-center justify-center relative">
         <span className="font-bold text-sm text-black">
-          {otherUser ? otherUser[0] : "?"}
+          {otherUser?.username?.[0]?.toUpperCase() || "?"}
         </span>
-        {unread > 0 && (
-          <span className="absolute -top-1 -right-1 bg-red-600 text-white text-xs w-5 h-5 rounded-full flex items-center justify-center">
-            {unread}
-          </span>
-        )}
       </div>
       <div className="flex-1">
         <h2 className="text-gray-200 text-md font-semibold">
-          {otherUser || chat.name}
+          {otherUser?.username || "Unknown"}
         </h2>
       </div>
     </div>
@@ -297,51 +267,45 @@ const ChatViewHeader = ({ chat, user, onBack, onDelete, onProfile }) => {
   const [otherUser, setOtherUser] = useState(null);
 
   useEffect(() => {
-    if (otherParticipant) {
-      supabase
-        .from("users")
-        .select("id, username, email")
-        .eq("id", otherParticipant)
-        .single()
-        .then(({ data }) => {
-          if (data) setOtherUser(data);
-        });
-    }
+    if (!otherParticipant) return;
+    supabase
+      .from("users")
+      .select("id, username")
+      .eq("id", otherParticipant)
+      .single()
+      .then(({ data }) => setOtherUser(data));
   }, [otherParticipant]);
 
   return (
     <div className="bg-black/80 p-4 flex items-center justify-between border-b border-gray-600">
-      <div className="flex items-center space-x-3">
+      <div className="flex items-center space-x-2">
         <ArrowLeft className="w-5 h-5 cursor-pointer" onClick={onBack} />
         <h2
           className="ml-2 text-md font-semibold cursor-pointer"
-          onClick={() => onProfile(otherUser?.id)}
+          onClick={() => otherUser && onProfile(otherUser.id)}
         >
-          {otherUser?.username || chat.name}
+          {otherUser?.username || "Unknown"}
         </h2>
       </div>
       <Trash2
-        className="w-5 h-5 cursor-pointer text-red-400"
+        className="w-5 h-5 text-red-400 cursor-pointer"
         onClick={() => onDelete(chat.id)}
       />
     </div>
   );
 };
 
-// ✅ Messages left/right
 const Message = ({ msg, userId }) => {
   const isMine = msg.sender_id === userId;
   return (
-    <div className={`flex ${isMine ? "justify-end" : "justify-start"}`}>
-      <div
-        className={`p-3 rounded-2xl max-w-[70%] ${
-          isMine
-            ? "bg-gray-700 text-white self-end"
-            : "bg-gray-800 text-gray-200 self-start"
-        }`}
-      >
-        <p>{msg.text}</p>
-      </div>
+    <div
+      className={`p-3 rounded-2xl max-w-[75%] ${
+        isMine
+          ? "bg-blue-600 text-white self-end"
+          : "bg-gray-700 text-gray-100 self-start"
+      }`}
+    >
+      <p>{msg.text}</p>
     </div>
   );
 };
@@ -353,9 +317,7 @@ const ChatInput = ({ onSend }) => {
       <input
         value={text}
         onChange={(e) => setText(e.target.value)}
-        onKeyDown={(e) =>
-          e.key === "Enter" && onSend(text) && setText("")
-        }
+        onKeyDown={(e) => e.key === "Enter" && onSend(text) && setText("")}
         className="flex-1 p-2 bg-gray-800/50 rounded-xl text-sm text-gray-200"
         placeholder="Message..."
       />
@@ -412,35 +374,6 @@ const AuthScreen = ({ onLogin }) => {
   );
 };
 
-// ✅ Profile Overlay
-const ProfileOverlay = ({ userId, onClose }) => {
-  const [profile, setProfile] = useState(null);
-
-  useEffect(() => {
-    if (userId) {
-      supabase
-        .from("users")
-        .select("username, email")
-        .eq("id", userId)
-        .single()
-        .then(({ data }) => setProfile(data));
-    }
-  }, [userId]);
-
-  if (!profile) return null;
-
-  return (
-    <div className="p-8 flex flex-col space-y-4">
-      <h2 className="text-lg font-bold">Profile</h2>
-      <p className="text-gray-300">Username: {profile.username}</p>
-      <p className="text-gray-300">Email: {profile.email}</p>
-      <button onClick={onClose} className="text-gray-400 mt-4">
-        Close
-      </button>
-    </div>
-  );
-};
-
 const AddContactOverlay = ({ onAdd, onClose }) => {
   const [username, setUsername] = useState("");
   return (
@@ -460,6 +393,41 @@ const AddContactOverlay = ({ onAdd, onClose }) => {
       </button>
       <button onClick={onClose} className="text-gray-400">
         Cancel
+      </button>
+    </div>
+  );
+};
+
+const ProfileOverlay = ({ userId, onClose }) => {
+  const [profile, setProfile] = useState(null);
+
+  useEffect(() => {
+    if (userId) {
+      supabase
+        .from("users")
+        .select("username, email")
+        .eq("id", userId)
+        .single()
+        .then(({ data }) => setProfile(data));
+    }
+  }, [userId]);
+
+  if (!profile) return null;
+
+  return (
+    <div className="p-8 flex flex-col space-y-4">
+      <h2 className="text-lg font-bold">Profile</h2>
+      <p>
+        <strong>Username:</strong> {profile.username}
+      </p>
+      <p>
+        <strong>Email:</strong> {profile.email}
+      </p>
+      <button
+        onClick={onClose}
+        className="p-2 bg-gray-600 text-black rounded-xl"
+      >
+        Close
       </button>
     </div>
   );
