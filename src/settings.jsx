@@ -1,14 +1,11 @@
+// src/settings.jsx
 import React from "react";
 
-const Settings = ({ user }) => {
+export default function Settings() {
   return (
-    <div className="p-6 bg-black text-white h-screen">
-      <h2 className="text-2xl font-bold mb-6">Settings</h2>
-      <p>Email: {user?.email}</p>
-      <p>Username: {user?.username}</p>
-      {/* Expand with avatar upload, theme, etc. */}
+    <div style={{ padding: 20 }}>
+      <h2>Settings</h2>
+      <p>Profile & app settings will go here.</p>
     </div>
   );
-};
-
-export default Settings;
+}
