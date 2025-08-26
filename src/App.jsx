@@ -1,5 +1,5 @@
 // src/App.jsx
-import React, { useState, useEffect } from "react";
+import React, { useEffect, useState } from "react";
 import { Plus, ArrowLeft, Send, Trash2 } from "lucide-react";
 import supabase from "./supabaseClient";
 
@@ -10,7 +10,6 @@ export default function App() {
   const [messages, setMessages] = useState([]);
   const [chats, setChats] = useState([]);
   const [showAddContact, setShowAddContact] = useState(false);
-  const [showProfile, setShowProfile] = useState(null);
 
   // --- Supabase Auth ---
   useEffect(() => {
@@ -40,8 +39,39 @@ export default function App() {
 
   // --- Load Chats ---
   async function loadChats() {
-    const { data, error } = await supabase.from("chats").select("*");
-    if (!error) setChats(data);
+    if (!user) return;
+
+    const { data: chatsData, error } = await supabase
+      .from("chats")
+      .select("*")
+      .contains("participants", [user.id]);
+
+    if (error) {
+      console.error("Error loading chats:", error);
+      return;
+    }
+
+    // Resolve usernames
+    const enrichedChats = await Promise.all(
+      chatsData.map(async (chat) => {
+        const otherId = chat.participants.find((id) => id !== user.id);
+
+        if (!otherId) return { ...chat, displayName: "Unknown" };
+
+        const { data: otherUser } = await supabase
+          .from("users")
+          .select("username")
+          .eq("id", otherId)
+          .single();
+
+        return {
+          ...chat,
+          displayName: otherUser?.username || "Unknown",
+        };
+      })
+    );
+
+    setChats(enrichedChats);
   }
 
   // --- Load Messages ---
@@ -54,10 +84,12 @@ export default function App() {
         .select("*")
         .eq("chat_id", activeChat.id)
         .order("created_at", { ascending: true });
+
       if (!error) setMessages(data);
     }
     fetchMessages();
 
+    // Realtime subscription
     const channel = supabase
       .channel("room:" + activeChat.id)
       .on(
@@ -91,91 +123,74 @@ export default function App() {
 
   // --- Add Contact ---
   async function handleAddContact(username) {
-    const { data: contact } = await supabase
+    if (!user) return;
+
+    const { data: contact, error } = await supabase
       .from("users")
       .select("id, username")
       .eq("username", username)
       .single();
 
-    if (contact) {
-      // check if chat already exists
-      const { data: existing } = await supabase
-        .from("chats")
-        .select("*")
-        .contains("participants", [user.id, contact.id])
-        .maybeSingle();
-
-      if (existing) {
-        setActiveChat(existing);
-        setShowAddContact(false);
-        return;
-      }
-
-      const { data, error } = await supabase
-        .from("chats")
-        .insert({
-          participants: [user.id, contact.id],
-        })
-        .select()
-        .single();
-
-      if (!error) setChats([data, ...chats]);
+    if (error || !contact) {
+      alert("User not found.");
+      return;
     }
+
+    const { data: existingChats } = await supabase
+      .from("chats")
+      .select("*")
+      .contains("participants", [user.id])
+      .contains("participants", [contact.id]);
+
+    if (existingChats?.length > 0) {
+      alert("Chat already exists.");
+      return;
+    }
+
+    const { data: newChat, error: chatErr } = await supabase
+      .from("chats")
+      .insert({
+        participants: [user.id, contact.id],
+      })
+      .select()
+      .single();
+
+    if (chatErr) {
+      console.error(chatErr);
+      alert("Error creating chat.");
+      return;
+    }
+
+    setChats([newChat, ...chats]);
     setShowAddContact(false);
   }
 
   // --- Delete Chat ---
-  async function handleDeleteChat(chatId) {
+  async function deleteChat(chatId) {
     const { error } = await supabase.from("chats").delete().eq("id", chatId);
     if (error) {
-      console.error("Delete failed", error);
-      alert("Unable to delete chat: " + error.message);
+      console.error("Error deleting chat:", error);
     } else {
-      setChats(chats.filter((c) => c.id !== chatId));
+      setChats((prev) => prev.filter((c) => c.id !== chatId));
       setActiveChat(null);
     }
   }
 
-  // --- Magic Link Login ---
-  async function handleLogin(email) {
-    if (!email) {
-      alert("Please enter a valid email");
-      return;
-    }
-
-    const { error } = await supabase.auth.signInWithOtp({
-      email,
-      options: { emailRedirectTo: `${window.location.origin}/auth/callback` },
-    });
-
-    if (error) {
-      console.error(error);
-      alert("Error sending magic link: " + error.message);
-    } else {
-      alert("Check your email for a magic link from Vaulted ✉️");
-    }
-  }
-
   const renderContent = () => {
-    if (!isLoggedIn) return <AuthScreen onLogin={handleLogin} />;
+    if (!isLoggedIn) {
+      return <AuthScreen onLogin={handleLogin} />;
+    }
 
-    if (showAddContact)
+    if (showAddContact) {
       return (
         <AddContactOverlay
           onAdd={handleAddContact}
           onClose={() => setShowAddContact(false)}
         />
       );
+    }
 
-    if (showProfile)
-      return (
-        <ProfileOverlay
-          userId={showProfile}
-          onClose={() => setShowProfile(null)}
-        />
-      );
-
-    if (!activeChat)
+    if (!activeChat) {
       return (
         <div>
           <ChatListHeader onAddContact={() => setShowAddContact(true)} />
@@ -184,24 +199,22 @@ export default function App() {
               <ChatListItem
                 key={chat.id}
                 chat={chat}
-                currentUser={user}
                 onClick={() => setActiveChat(chat)}
+                onDelete={() => deleteChat(chat.id)}
               />
             ))}
           </div>
         </div>
       );
+    }
 
     return (
       <div className="flex flex-col h-full">
         <ChatViewHeader
           chat={activeChat}
-          user={user}
           onBack={() => setActiveChat(null)}
-          onDelete={handleDeleteChat}
-          onProfile={(id) => setShowProfile(id)}
         />
-        <div className="flex-1 overflow-y-auto p-4 space-y-4 text-sm flex flex-col">
+        <div className="flex-1 overflow-y-auto p-4 space-y-4 text-sm">
           {messages.map((msg) => (
             <Message key={msg.id} msg={msg} userId={user.id} />
           ))}
@@ -229,83 +242,59 @@ const ChatListHeader = ({ onAddContact }) => (
   </div>
 );
 
-const ChatListItem = ({ chat, currentUser, onClick }) => {
-  const otherParticipant = chat.participants?.find((p) => p !== currentUser.id);
-  const [otherUser, setOtherUser] = useState(null);
-
-  useEffect(() => {
-    if (!otherParticipant) return;
-    supabase
-      .from("users")
-      .select("id, username")
-      .eq("id", otherParticipant)
-      .single()
-      .then(({ data }) => setOtherUser(data));
-  }, [otherParticipant]);
-
-  return (
+const ChatListItem = ({ chat, onClick, onDelete }) => (
+  <div
+    className="flex items-center space-x-4 p-4 rounded-xl cursor-pointer hover:bg-gray-800"
+  >
     <div
+      className="flex-1 flex items-center space-x-4"
       onClick={onClick}
-      className="flex items-center space-x-4 p-4 rounded-xl cursor-pointer hover:bg-gray-800"
     >
-      <div className="w-12 h-12 rounded-full bg-gray-600 flex items-center justify-center relative">
+      <div className="w-12 h-12 rounded-full bg-gray-600 flex items-center justify-center">
         <span className="font-bold text-sm text-black">
-          {otherUser?.username?.[0]?.toUpperCase() || "?"}
+          {chat.displayName ? chat.displayName[0] : "?"}
         </span>
       </div>
       <div className="flex-1">
         <h2 className="text-gray-200 text-md font-semibold">
-          {otherUser?.username || "Unknown"}
+          {chat.displayName || "Unknown"}
         </h2>
       </div>
     </div>
-  );
-};
+    <Trash2
+      className="w-5 h-5 text-red-500 cursor-pointer"
+      onClick={(e) => {
+        e.stopPropagation();
+        onDelete();
+      }}
+    />
+  </div>
+);
 
-const ChatViewHeader = ({ chat, user, onBack, onDelete, onProfile }) => {
-  const otherParticipant = chat.participants?.find((p) => p !== user.id);
-  const [otherUser, setOtherUser] = useState(null);
-
-  useEffect(() => {
-    if (!otherParticipant) return;
-    supabase
-      .from("users")
-      .select("id, username")
-      .eq("id", otherParticipant)
-      .single()
-      .then(({ data }) => setOtherUser(data));
-  }, [otherParticipant]);
-
-  return (
-    <div className="bg-black/80 p-4 flex items-center justify-between border-b border-gray-600">
-      <div className="flex items-center space-x-2">
-        <ArrowLeft className="w-5 h-5 cursor-pointer" onClick={onBack} />
-        <h2
-          className="ml-2 text-md font-semibold cursor-pointer"
-          onClick={() => otherUser && onProfile(otherUser.id)}
-        >
-          {otherUser?.username || "Unknown"}
-        </h2>
-      </div>
-      <Trash2
-        className="w-5 h-5 text-red-400 cursor-pointer"
-        onClick={() => onDelete(chat.id)}
-      />
-    </div>
-  );
-};
+const ChatViewHeader = ({ chat, onBack }) => (
+  <div className="bg-black/80 p-4 flex items-center border-b border-gray-600">
+    <ArrowLeft className="w-5 h-5 cursor-pointer" onClick={onBack} />
+    <h2 className="ml-4 text-md font-semibold cursor-pointer">
+      {chat.displayName}
+    </h2>
+  </div>
+);
 
 const Message = ({ msg, userId }) => {
   const isMine = msg.sender_id === userId;
   return (
     <div
-      className={`p-3 rounded-2xl max-w-[75%] ${
-        isMine
-          ? "bg-blue-600 text-white self-end"
-          : "bg-gray-700 text-gray-100 self-start"
+      className={`flex ${
+        isMine ? "justify-end" : "justify-start"
       }`}
     >
-      <p>{msg.text}</p>
+      <div
+        className={`p-3 rounded-2xl max-w-[75%] ${
+          isMine ? "bg-blue-600 text-white" : "bg-gray-700 text-white"
+        }`}
+      >
+        <p>{msg.text}</p>
+      </div>
     </div>
   );
 };
@@ -317,7 +306,12 @@ const ChatInput = ({ onSend }) => {
       <input
         value={text}
         onChange={(e) => setText(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && onSend(text) && setText("")}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            onSend(text);
+            setText("");
+          }
+        }}
         className="flex-1 p-2 bg-gray-800/50 rounded-xl text-sm text-gray-200"
         placeholder="Message..."
       />
@@ -393,41 +387,6 @@ const AddContactOverlay = ({ onAdd, onClose }) => {
       </button>
       <button onClick={onClose} className="text-gray-400">
         Cancel
-      </button>
-    </div>
-  );
-};
-
-const ProfileOverlay = ({ userId, onClose }) => {
-  const [profile, setProfile] = useState(null);
-
-  useEffect(() => {
-    if (userId) {
-      supabase
-        .from("users")
-        .select("username, email")
-        .eq("id", userId)
-        .single()
-        .then(({ data }) => setProfile(data));
-    }
-  }, [userId]);
-
-  if (!profile) return null;
-
-  return (
-    <div className="p-8 flex flex-col space-y-4">
-      <h2 className="text-lg font-bold">Profile</h2>
-      <p>
-        <strong>Username:</strong> {profile.username}
-      </p>
-      <p>
-        <strong>Email:</strong> {profile.email}
-      </p>
-      <button
-        onClick={onClose}
-        className="p-2 bg-gray-600 text-black rounded-xl"
-      >
-        Close
       </button>
     </div>
   );
