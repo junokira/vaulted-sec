@@ -1,8 +1,12 @@
-import React, { useState, useEffect } from "react";
-import { Plus, ArrowLeft, Send } from "lucide-react";
-import { supabase } from "./supabaseClient";
+// src/App.jsx
+import React, { useEffect, useState } from "react";
+import { ArrowLeft, Plus, Send } from "lucide-react";
+import supabase from "./supabaseClient";
+import "./index.css";
 
-// --- Main App ---
+// ============================
+// App.jsx (main entry point)
+// ============================
 export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [user, setUser] = useState(null);
@@ -148,7 +152,7 @@ export default function App() {
     }
   }, []);
 
-  // --- Render ---
+  // --- Render Content ---
   const renderContent = () => {
     if (!isLoggedIn) {
       return <AuthScreen onLogin={handleLogin} />;
@@ -182,7 +186,11 @@ export default function App() {
 
     return (
       <div className="flex flex-col h-full">
-        <ChatViewHeader chat={activeChat} onBack={() => setActiveChat(null)} />
+        <ChatViewHeader
+          chat={activeChat}
+          user={user}
+          onBack={() => setActiveChat(null)}
+        />
         <div className="flex-1 overflow-y-auto p-4 space-y-4 text-sm">
           {messages.map((msg) => (
             <Message key={msg.id} msg={msg} userId={user.id} />
@@ -202,14 +210,14 @@ export default function App() {
   );
 }
 
-// --- Components ---
+// ============================
+// Components
+// ============================
 
 const ChatListHeader = ({ onAddContact }) => (
   <div className="bg-black/80 p-4 flex items-center justify-between border-b border-gray-600">
     <h1 className="text-xl font-bold">Vaulted</h1>
-    <div className="flex items-center space-x-4">
-      <Plus className="w-5 h-5 cursor-pointer" onClick={onAddContact} />
-    </div>
+    <Plus className="w-5 h-5 cursor-pointer" onClick={onAddContact} />
   </div>
 );
 
@@ -227,22 +235,48 @@ const ChatListItem = ({ chat, onClick }) => (
   </div>
 );
 
-const ChatViewHeader = ({ chat, onBack }) => (
-  <div className="bg-black/80 p-4 flex items-center border-b border-gray-600">
-    <ArrowLeft className="w-5 h-5 cursor-pointer" onClick={onBack} />
-    <h2 className="ml-4 text-md font-semibold">{chat.name}</h2>
-  </div>
-);
+// ✅ FIX: Display other participant username
+const ChatViewHeader = ({ chat, onBack, user }) => {
+  const otherParticipant = chat.participants?.find((p) => p !== user.id);
+  const [otherUser, setOtherUser] = useState(null);
 
+  useEffect(() => {
+    if (otherParticipant) {
+      supabase
+        .from("users")
+        .select("username")
+        .eq("id", otherParticipant)
+        .single()
+        .then(({ data }) => {
+          if (data) setOtherUser(data.username);
+        });
+    }
+  }, [otherParticipant]);
+
+  return (
+    <div className="bg-black/80 p-4 flex items-center border-b border-gray-600">
+      <ArrowLeft className="w-5 h-5 cursor-pointer" onClick={onBack} />
+      <h2 className="ml-4 text-md font-semibold">
+        {otherUser || chat.name}
+      </h2>
+    </div>
+  );
+};
+
+// ✅ FIX: Align messages left/right
 const Message = ({ msg, userId }) => {
   const isMine = msg.sender_id === userId;
   return (
-    <div
-      className={`p-3 rounded-2xl max-w-[75%] ${
-        isMine ? "bg-gray-700 self-end" : "bg-gray-800 self-start"
-      }`}
-    >
-      <p>{msg.text}</p>
+    <div className={`flex ${isMine ? "justify-end" : "justify-start"}`}>
+      <div
+        className={`p-3 rounded-2xl max-w-[70%] ${
+          isMine
+            ? "bg-gray-700 text-white self-end"
+            : "bg-gray-800 text-gray-200 self-start"
+        }`}
+      >
+        <p>{msg.text}</p>
+      </div>
     </div>
   );
 };
