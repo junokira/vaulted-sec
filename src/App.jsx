@@ -7,6 +7,9 @@ export default function App() {
   const [invites, setInvites] = useState([]);
   const [usernameInput, setUsernameInput] = useState("");
   const [showModal, setShowModal] = useState(false);
+  const [activeChat, setActiveChat] = useState(null);
+  const [messages, setMessages] = useState([]);
+  const [newMessage, setNewMessage] = useState("");
 
   // --- Auth ---
   useEffect(() => {
@@ -18,30 +21,20 @@ export default function App() {
     });
   }, []);
 
-  // --- Fetch data ---
+  // --- Fetch chats + invites ---
   useEffect(() => {
     if (session) {
       fetchChats();
       fetchInvites();
 
-      // realtime for invites
       const invitesChannel = supabase
         .channel("invites-changes")
-        .on(
-          "postgres_changes",
-          { event: "*", schema: "public", table: "invites" },
-          () => fetchInvites()
-        )
+        .on("postgres_changes", { event: "*", schema: "public", table: "invites" }, fetchInvites)
         .subscribe();
 
-      // realtime for chats
       const chatsChannel = supabase
         .channel("chats-changes")
-        .on(
-          "postgres_changes",
-          { event: "*", schema: "public", table: "chats" },
-          () => fetchChats()
-        )
+        .on("postgres_changes", { event: "*", schema: "public", table: "chats" }, fetchChats)
         .subscribe();
 
       return () => {
@@ -68,6 +61,7 @@ export default function App() {
           .from("profiles")
           .select("id, username")
           .in("id", chat.participants);
+
         return { ...chat, participantsInfo: profiles || [] };
       })
     );
@@ -101,7 +95,40 @@ export default function App() {
     setInvites(invitesWithSenders);
   };
 
-  // --- Actions ---
+  // --- Chat view ---
+  const openChat = async (chat) => {
+    setActiveChat(chat);
+    const { data, error } = await supabase
+      .from("messages")
+      .select("id, sender_id, text, created_at")
+      .eq("chat_id", chat.id)
+      .order("created_at", { ascending: true });
+
+    if (!error) setMessages(data || []);
+
+    const channel = supabase
+      .channel("chat-" + chat.id)
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "messages", filter: `chat_id=eq.${chat.id}` },
+        (payload) => {
+          setMessages((prev) => [...prev, payload.new]);
+        }
+      )
+      .subscribe();
+
+    return () => supabase.removeChannel(channel);
+  };
+
+  const sendMessage = async () => {
+    if (!newMessage.trim()) return;
+    await supabase.from("messages").insert([
+      { chat_id: activeChat.id, sender_id: session.user.id, text: newMessage },
+    ]);
+    setNewMessage("");
+  };
+
+  // --- Invites actions ---
   const sendInvite = async () => {
     if (!usernameInput) return;
 
@@ -135,16 +162,14 @@ export default function App() {
 
   const acceptInvite = async (inviteId, senderId) => {
     await supabase.from("invites").update({ status: "accepted" }).eq("id", inviteId);
-    await supabase.from("chats").insert([
-      { participants: [session.user.id, senderId] },
-    ]);
+    await supabase.from("chats").insert([{ participants: [session.user.id, senderId] }]);
   };
 
   const denyInvite = async (inviteId) => {
     await supabase.from("invites").update({ status: "denied" }).eq("id", inviteId);
   };
 
-  // --- Auth Screen ---
+  // --- Auth screen ---
   if (!session) {
     return (
       <div className="flex items-center justify-center h-screen bg-black text-white">
@@ -158,16 +183,57 @@ export default function App() {
     );
   }
 
-  // --- Main App ---
+  // --- Chat screen ---
+  if (activeChat) {
+    const otherUser = activeChat.participantsInfo.find((p) => p.id !== session.user.id);
+
+    return (
+      <div className="flex items-center justify-center h-screen bg-black text-white">
+        <div className="w-[420px] h-[600px] p-4 bg-gray-900 rounded-2xl shadow-lg border border-gray-800 flex flex-col">
+          <div className="flex items-center mb-4">
+            <button onClick={() => setActiveChat(null)} className="mr-2 text-gray-400">
+              ←
+            </button>
+            <h2 className="text-lg font-bold">{otherUser?.username || "Unknown"}</h2>
+          </div>
+
+          <div className="flex-1 overflow-y-auto space-y-2">
+            {messages.map((msg) => (
+              <div
+                key={msg.id}
+                className={`p-2 rounded-lg max-w-[70%] ${
+                  msg.sender_id === session.user.id ? "bg-gray-700 ml-auto" : "bg-gray-800"
+                }`}
+              >
+                {msg.text}
+              </div>
+            ))}
+          </div>
+
+          <div className="flex items-center mt-2">
+            <input
+              value={newMessage}
+              onChange={(e) => setNewMessage(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && sendMessage()}
+              placeholder="Type a message..."
+              className="flex-1 p-2 bg-gray-800 rounded-lg mr-2 text-white"
+            />
+            <button onClick={sendMessage} className="px-3 py-2 bg-gray-700 rounded-lg">
+              Send
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // --- Main app (chat list) ---
   return (
     <div className="flex items-center justify-center h-screen bg-black text-white">
       <div className="w-[420px] min-h-[400px] p-4 bg-gray-900 rounded-2xl shadow-lg border border-gray-800 flex flex-col">
         <div className="flex justify-between items-center mb-4">
           <h1 className="text-lg font-bold">Vaulted</h1>
-          <button
-            className="text-xl font-bold"
-            onClick={() => setShowModal(true)}
-          >
+          <button className="text-xl font-bold" onClick={() => setShowModal(true)}>
             +
           </button>
         </div>
@@ -179,18 +245,18 @@ export default function App() {
               No chats yet. Add a contact to start.
             </p>
           )}
-          {chats.map((chat) => (
-            <div
-              key={chat.id}
-              className="p-3 rounded-lg bg-gray-800 hover:bg-gray-700 cursor-pointer"
-            >
-              Chat with{" "}
-              {chat.participantsInfo
-                .filter((p) => p.id !== session.user.id)
-                .map((p) => p.username)
-                .join(", ") || "Unknown"}
-            </div>
-          ))}
+          {chats.map((chat) => {
+            const otherUser = chat.participantsInfo.find((p) => p.id !== session.user.id);
+            return (
+              <div
+                key={chat.id}
+                onClick={() => openChat(chat)}
+                className="p-3 rounded-lg bg-gray-800 hover:bg-gray-700 cursor-pointer"
+              >
+                {otherUser?.username || "Unknown"}
+              </div>
+            );
+          })}
         </div>
 
         {/* Modal */}
