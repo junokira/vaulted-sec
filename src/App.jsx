@@ -5,7 +5,7 @@ import { createClient } from '@supabase/supabase-js';
 // --- Supabase Setup ---
 const supabase = createClient(
   "https://dipbxozosmqocghgclqm.supabase.co", // replace with your project URL
-  "YOUR_ANON_KEY" // replace with your anon key
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRpcGJ4b3pvc21xb2NnaGdjbHFtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTYxMjUwODYsImV4cCI6MjA3MTcwMTA4Nn0.kJH6WtMK-EWuvoOAkVmMhgiYdTG7Ro7ghApMKWZgTLc" // replace with your anon key
 );
 
 export default function App() {
@@ -14,10 +14,10 @@ export default function App() {
   const [activeChat, setActiveChat] = useState(null);
   const [messages, setMessages] = useState([]);
   const [chats, setChats] = useState([]);
-  const [showAddContact, setShowAddContact] = useState(false);
   const [invites, setInvites] = useState([]);
+  const [showAddContact, setShowAddContact] = useState(false);
 
-  // --- Supabase Auth ---
+  // --- Auth ---
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
       if (data.session) {
@@ -48,10 +48,10 @@ export default function App() {
     if (!user) return;
     const { data, error } = await supabase
       .from('chats')
-      .select('id, participants, profiles!chats_participants_fkey(username)')
+      .select('id, name, participants')
       .contains('participants', [user.id]);
 
-    if (!error) setChats(data || []);
+    if (!error && data) setChats(data);
   }
 
   // --- Load Invites ---
@@ -59,14 +59,20 @@ export default function App() {
     if (!user) return;
     const { data, error } = await supabase
       .from('invites')
-      .select('id, sender_id, profiles!invites_sender_id_fkey(username), status')
+      .select(`
+        id,
+        sender_id,
+        recipient_id,
+        status,
+        profiles:sender_id(username)
+      `)
       .eq('recipient_id', user.id)
       .eq('status', 'pending');
 
-    if (!error) setInvites(data || []);
+    if (!error && data) setInvites(data);
   }
 
-  // --- Load Messages ---
+  // --- Messages ---
   useEffect(() => {
     if (!activeChat) return;
 
@@ -76,13 +82,20 @@ export default function App() {
         .select('*')
         .eq('chat_id', activeChat.id)
         .order('created_at', { ascending: true });
-      if (!error) setMessages(data || []);
+
+      if (!error && data) setMessages(data);
     }
+
     fetchMessages();
 
     const channel = supabase
       .channel('room:' + activeChat.id)
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `chat_id=eq.${activeChat.id}` }, (payload) => {
+      .on('postgres_changes', {
+        event: 'INSERT',
+        schema: 'public',
+        table: 'messages',
+        filter: `chat_id=eq.${activeChat.id}`,
+      }, (payload) => {
         setMessages((prev) => [...prev, payload.new]);
       })
       .subscribe();
@@ -92,7 +105,6 @@ export default function App() {
     };
   }, [activeChat]);
 
-  // --- Send Message ---
   async function handleSendMessage(text) {
     if (!text.trim()) return;
     await supabase.from('messages').insert({
@@ -104,40 +116,51 @@ export default function App() {
 
   // --- Add Contact (send invite) ---
   async function handleAddContact(username) {
-    const { data: contact } = await supabase
+    if (!username.trim()) return;
+
+    const { data: contact, error } = await supabase
       .from('profiles')
       .select('id, username')
       .eq('username', username)
       .single();
 
-    if (contact) {
-      await supabase.from('invites').insert({
-        sender_id: user.id,
-        recipient_id: contact.id,
-        status: 'pending',
-      });
-      alert(`Invite sent to ${username}!`);
-    } else {
+    if (error || !contact) {
       alert("User not found.");
+      return;
+    }
+
+    const { error: inviteError } = await supabase.from('invites').insert({
+      sender_id: user.id,
+      recipient_id: contact.id,
+      status: 'pending'
+    });
+
+    if (inviteError) {
+      console.error(inviteError);
+      alert("Error sending invite.");
+    } else {
+      alert(`Invite sent to ${username}!`);
     }
     setShowAddContact(false);
   }
 
   // --- Accept Invite ---
   async function handleAcceptInvite(invite) {
-    await supabase.from('chats').insert({
-      participants: [user.id, invite.sender_id],
+    const { error: chatError } = await supabase.from('chats').insert({
+      name: invite.profiles.username,
+      participants: [invite.sender_id, invite.recipient_id],
     });
 
-    await supabase.from('invites').update({ status: 'accepted' }).eq('id', invite.id);
-
-    loadChats();
-    loadInvites();
+    if (!chatError) {
+      await supabase.from('invites').delete().eq('id', invite.id);
+      loadChats();
+      loadInvites();
+    }
   }
 
   // --- Deny Invite ---
-  async function handleDenyInvite(invite) {
-    await supabase.from('invites').update({ status: 'denied' }).eq('id', invite.id);
+  async function handleDenyInvite(inviteId) {
+    await supabase.from('invites').delete().eq('id', inviteId);
     loadInvites();
   }
 
@@ -147,11 +170,10 @@ export default function App() {
       alert("Please enter a valid email");
       return;
     }
+
     const { error } = await supabase.auth.signInWithOtp({
       email,
-      options: {
-        emailRedirectTo: `${window.location.origin}/auth/callback`,
-      },
+      options: { emailRedirectTo: `${window.location.origin}/auth/callback` }
     });
 
     if (error) {
@@ -162,31 +184,47 @@ export default function App() {
     }
   }
 
-  const renderContent = () => {
-    if (!isLoggedIn) {
-      return <AuthScreen onLogin={handleLogin} />;
+  // --- Auth Callback ---
+  useEffect(() => {
+    const hash = window.location.hash;
+    if (hash.includes("access_token")) {
+      supabase.auth.getSession().then(({ data }) => {
+        if (data.session) {
+          setUser(data.session.user);
+          setIsLoggedIn(true);
+          loadChats();
+          loadInvites();
+          window.history.replaceState({}, document.title, "/");
+        }
+      });
     }
+  }, []);
+
+  const renderContent = () => {
+    if (!isLoggedIn) return <AuthScreen onLogin={handleLogin} />;
 
     if (showAddContact) {
-      return <AddContactOverlay onAdd={handleAddContact} onClose={() => setShowAddContact(false)} />;
+      return (
+        <AddContactOverlay
+          onAdd={handleAddContact}
+          onClose={() => setShowAddContact(false)}
+          invites={invites}
+          onAccept={handleAcceptInvite}
+          onDeny={handleDenyInvite}
+        />
+      );
     }
 
     if (!activeChat) {
       return (
-        <div>
+        <div className="flex flex-col h-full">
           <ChatListHeader onAddContact={() => setShowAddContact(true)} />
-          <div className="p-4 space-y-2">
-            {chats.map((chat) => (
+          <div className="p-4 space-y-2 flex-1 min-h-[300px]">
+            {chats.map(chat => (
               <ChatListItem key={chat.id} chat={chat} onClick={() => setActiveChat(chat)} />
             ))}
-
-            {invites.length > 0 && (
-              <div className="mt-6">
-                <h3 className="text-gray-400 mb-2">Invites</h3>
-                {invites.map((invite) => (
-                  <InviteItem key={invite.id} invite={invite} onAccept={handleAcceptInvite} onDeny={handleDenyInvite} />
-                ))}
-              </div>
+            {chats.length === 0 && (
+              <p className="text-gray-500 text-center">No chats yet. Add a contact to start chatting.</p>
             )}
           </div>
         </div>
@@ -208,7 +246,7 @@ export default function App() {
 
   return (
     <div className="bg-black text-gray-400 min-h-screen flex items-center justify-center font-sans p-4 antialiased">
-      <div className="w-full max-w-lg mx-auto bg-gray-900 rounded-3xl overflow-hidden shadow-2xl ring-2 ring-gray-600">
+      <div className="w-full max-w-lg min-h-[400px] mx-auto bg-gray-900 rounded-3xl overflow-hidden shadow-2xl ring-2 ring-gray-600">
         {renderContent()}
       </div>
     </div>
@@ -227,18 +265,16 @@ const ChatListHeader = ({ onAddContact }) => (
 const ChatListItem = ({ chat, onClick }) => (
   <div onClick={onClick} className="flex items-center space-x-4 p-4 rounded-xl cursor-pointer hover:bg-gray-800">
     <div className="w-12 h-12 rounded-full bg-gray-600 flex items-center justify-center">
-      <span className="font-bold text-sm text-black">{chat.profiles?.username?.[0]}</span>
+      <span className="font-bold text-sm text-black">{chat.name[0]}</span>
     </div>
-    <div className="flex-1">
-      <h2 className="text-gray-200 text-md font-semibold">{chat.profiles?.username}</h2>
-    </div>
+    <h2 className="text-gray-200 text-md font-semibold">{chat.name}</h2>
   </div>
 );
 
 const ChatViewHeader = ({ chat, onBack }) => (
   <div className="bg-black/80 p-4 flex items-center border-b border-gray-600">
     <ArrowLeft className="w-5 h-5 cursor-pointer" onClick={onBack} />
-    <h2 className="ml-4 text-md font-semibold">{chat.profiles?.username}</h2>
+    <h2 className="ml-4 text-md font-semibold">{chat.name}</h2>
   </div>
 );
 
@@ -285,7 +321,14 @@ const AuthScreen = ({ onLogin }) => {
       </div>
       <h2 className="text-xl font-bold">Welcome to Vaulted</h2>
       <p className="text-sm text-gray-500">Enter your email to get a magic link login.</p>
-      <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} className="p-3 bg-gray-800/50 rounded-xl text-sm text-gray-200" placeholder="you@email.com" required />
+      <input
+        type="email"
+        value={email}
+        onChange={(e) => setEmail(e.target.value)}
+        className="p-3 bg-gray-800/50 rounded-xl text-sm text-gray-200"
+        placeholder="you@email.com"
+        required
+      />
       <button type="submit" disabled={loading} className="p-3 bg-gray-600 text-black rounded-xl disabled:opacity-50">
         {loading ? "Sending..." : "Send Magic Link"}
       </button>
@@ -293,24 +336,30 @@ const AuthScreen = ({ onLogin }) => {
   );
 };
 
-const AddContactOverlay = ({ onAdd, onClose }) => {
+const AddContactOverlay = ({ onAdd, onClose, invites, onAccept, onDeny }) => {
   const [username, setUsername] = useState('');
   return (
     <div className="p-8 flex flex-col space-y-4">
       <h2 className="text-md font-semibold">Add Contact</h2>
-      <input value={username} onChange={(e) => setUsername(e.target.value)} className="p-3 bg-gray-800/50 rounded-xl text-sm text-gray-200" placeholder="username" />
+      <input
+        value={username}
+        onChange={(e) => setUsername(e.target.value)}
+        className="p-3 bg-gray-800/50 rounded-xl text-sm text-gray-200"
+        placeholder="username"
+      />
       <button onClick={() => onAdd(username)} className="p-3 bg-gray-600 text-black rounded-xl">Add</button>
+      <h3 className="text-md font-semibold mt-4">Invites</h3>
+      {invites.length === 0 && <p className="text-gray-500 text-sm">No invites</p>}
+      {invites.map(invite => (
+        <div key={invite.id} className="flex items-center justify-between bg-gray-800/50 p-2 rounded-lg">
+          <span>{invite.profiles.username}</span>
+          <div className="space-x-2">
+            <button onClick={() => onAccept(invite)} className="px-2 py-1 bg-gray-600 text-black rounded">Accept</button>
+            <button onClick={() => onDeny(invite.id)} className="px-2 py-1 bg-gray-600 text-black rounded">Deny</button>
+          </div>
+        </div>
+      ))}
       <button onClick={onClose} className="text-gray-400">Cancel</button>
     </div>
   );
 };
-
-const InviteItem = ({ invite, onAccept, onDeny }) => (
-  <div className="flex items-center justify-between bg-gray-800 p-3 rounded-xl">
-    <span className="text-gray-200">{invite.profiles?.username}</span>
-    <div className="space-x-2">
-      <button onClick={() => onAccept(invite)} className="px-3 py-1 bg-gray-600 text-black rounded-lg">Accept</button>
-      <button onClick={() => onDeny(invite)} className="px-3 py-1 bg-gray-700 text-gray-300 rounded-lg">Deny</button>
-    </div>
-  </div>
-);
