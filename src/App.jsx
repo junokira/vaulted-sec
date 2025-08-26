@@ -26,21 +26,6 @@ export default function App() {
     if (session) {
       fetchChats();
       fetchInvites();
-
-      const invitesChannel = supabase
-        .channel("invites-changes")
-        .on("postgres_changes", { event: "*", schema: "public", table: "invites" }, fetchInvites)
-        .subscribe();
-
-      const chatsChannel = supabase
-        .channel("chats-changes")
-        .on("postgres_changes", { event: "*", schema: "public", table: "chats" }, fetchChats)
-        .subscribe();
-
-      return () => {
-        supabase.removeChannel(invitesChannel);
-        supabase.removeChannel(chatsChannel);
-      };
     }
   }, [session]);
 
@@ -121,10 +106,23 @@ export default function App() {
   };
 
   const sendMessage = async () => {
-    if (!newMessage.trim()) return;
-    await supabase.from("messages").insert([
-      { chat_id: activeChat.id, sender_id: session.user.id, text: newMessage },
-    ]);
+    if (!newMessage.trim() || !activeChat) return;
+
+    const { data, error } = await supabase
+      .from("messages")
+      .insert([
+        { chat_id: activeChat.id, sender_id: session.user.id, text: newMessage },
+      ])
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Error sending message:", error);
+      return;
+    }
+
+    // Push message locally so it appears instantly
+    setMessages((prev) => [...prev, data]);
     setNewMessage("");
   };
 
@@ -163,10 +161,13 @@ export default function App() {
   const acceptInvite = async (inviteId, senderId) => {
     await supabase.from("invites").update({ status: "accepted" }).eq("id", inviteId);
     await supabase.from("chats").insert([{ participants: [session.user.id, senderId] }]);
+    fetchChats();
+    fetchInvites();
   };
 
   const denyInvite = async (inviteId) => {
     await supabase.from("invites").update({ status: "denied" }).eq("id", inviteId);
+    fetchInvites();
   };
 
   // --- Auth screen ---
