@@ -1,6 +1,6 @@
 // src/App.jsx
 import React, { useEffect, useState } from "react";
-import { ArrowLeft, Plus, Send } from "lucide-react";
+import { ArrowLeft, Plus, Send, Trash2 } from "lucide-react";
 import supabase from "./supabaseClient";
 import "./index.css";
 
@@ -14,6 +14,8 @@ export default function App() {
   const [messages, setMessages] = useState([]);
   const [chats, setChats] = useState([]);
   const [showAddContact, setShowAddContact] = useState(false);
+  const [showProfile, setShowProfile] = useState(null);
+  const [unreadCounts, setUnreadCounts] = useState({}); // { chatId: count }
 
   // --- Supabase Auth ---
   useEffect(() => {
@@ -57,7 +59,10 @@ export default function App() {
         .select("*")
         .eq("chat_id", activeChat.id)
         .order("created_at", { ascending: true });
-      if (!error) setMessages(data);
+      if (!error) {
+        setMessages(data);
+        setUnreadCounts((prev) => ({ ...prev, [activeChat.id]: 0 })); // reset unread
+      }
     }
     fetchMessages();
 
@@ -73,6 +78,12 @@ export default function App() {
           filter: `chat_id=eq.${activeChat.id}`,
         },
         (payload) => {
+          if (payload.new.sender_id !== user.id) {
+            setUnreadCounts((prev) => ({
+              ...prev,
+              [activeChat.id]: (prev[activeChat.id] || 0) + 1,
+            }));
+          }
           setMessages((prev) => [...prev, payload.new]);
         }
       )
@@ -81,7 +92,7 @@ export default function App() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [activeChat]);
+  }, [activeChat, user]);
 
   // --- Send Message ---
   async function handleSendMessage(text) {
@@ -113,6 +124,14 @@ export default function App() {
       setChats([data, ...chats]);
     }
     setShowAddContact(false);
+  }
+
+  // --- Delete Chat ---
+  async function handleDeleteChat(chatId) {
+    await supabase.from("messages").delete().eq("chat_id", chatId);
+    await supabase.from("chats").delete().eq("id", chatId);
+    setChats(chats.filter((c) => c.id !== chatId));
+    setActiveChat(null);
   }
 
   // --- Magic Link Login ---
@@ -167,6 +186,12 @@ export default function App() {
       );
     }
 
+    if (showProfile) {
+      return (
+        <ProfileOverlay userId={showProfile} onClose={() => setShowProfile(null)} />
+      );
+    }
+
     if (!activeChat) {
       return (
         <div>
@@ -176,6 +201,8 @@ export default function App() {
               <ChatListItem
                 key={chat.id}
                 chat={chat}
+                currentUser={user}
+                unread={unreadCounts[chat.id]}
                 onClick={() => setActiveChat(chat)}
               />
             ))}
@@ -190,6 +217,8 @@ export default function App() {
           chat={activeChat}
           user={user}
           onBack={() => setActiveChat(null)}
+          onDelete={handleDeleteChat}
+          onProfile={setShowProfile}
         />
         <div className="flex-1 overflow-y-auto p-4 space-y-4 text-sm">
           {messages.map((msg) => (
@@ -221,23 +250,9 @@ const ChatListHeader = ({ onAddContact }) => (
   </div>
 );
 
-const ChatListItem = ({ chat, onClick }) => (
-  <div
-    onClick={onClick}
-    className="flex items-center space-x-4 p-4 rounded-xl cursor-pointer hover:bg-gray-800"
-  >
-    <div className="w-12 h-12 rounded-full bg-gray-600 flex items-center justify-center">
-      <span className="font-bold text-sm text-black">{chat.name[0]}</span>
-    </div>
-    <div className="flex-1">
-      <h2 className="text-gray-200 text-md font-semibold">{chat.name}</h2>
-    </div>
-  </div>
-);
-
-// ✅ FIX: Display other participant username
-const ChatViewHeader = ({ chat, onBack, user }) => {
-  const otherParticipant = chat.participants?.find((p) => p !== user.id);
+// ✅ FIX: Show other participant username + unread badge
+const ChatListItem = ({ chat, currentUser, unread, onClick }) => {
+  const otherParticipant = chat.participants?.find((p) => p !== currentUser.id);
   const [otherUser, setOtherUser] = useState(null);
 
   useEffect(() => {
@@ -254,16 +269,66 @@ const ChatViewHeader = ({ chat, onBack, user }) => {
   }, [otherParticipant]);
 
   return (
-    <div className="bg-black/80 p-4 flex items-center border-b border-gray-600">
-      <ArrowLeft className="w-5 h-5 cursor-pointer" onClick={onBack} />
-      <h2 className="ml-4 text-md font-semibold">
-        {otherUser || chat.name}
-      </h2>
+    <div
+      onClick={onClick}
+      className="flex items-center space-x-4 p-4 rounded-xl cursor-pointer hover:bg-gray-800"
+    >
+      <div className="w-12 h-12 rounded-full bg-gray-600 flex items-center justify-center relative">
+        <span className="font-bold text-sm text-black">
+          {otherUser ? otherUser[0] : "?"}
+        </span>
+        {unread > 0 && (
+          <span className="absolute -top-1 -right-1 bg-red-600 text-white text-xs w-5 h-5 rounded-full flex items-center justify-center">
+            {unread}
+          </span>
+        )}
+      </div>
+      <div className="flex-1">
+        <h2 className="text-gray-200 text-md font-semibold">
+          {otherUser || chat.name}
+        </h2>
+      </div>
     </div>
   );
 };
 
-// ✅ FIX: Align messages left/right
+const ChatViewHeader = ({ chat, user, onBack, onDelete, onProfile }) => {
+  const otherParticipant = chat.participants?.find((p) => p !== user.id);
+  const [otherUser, setOtherUser] = useState(null);
+
+  useEffect(() => {
+    if (otherParticipant) {
+      supabase
+        .from("users")
+        .select("id, username, email")
+        .eq("id", otherParticipant)
+        .single()
+        .then(({ data }) => {
+          if (data) setOtherUser(data);
+        });
+    }
+  }, [otherParticipant]);
+
+  return (
+    <div className="bg-black/80 p-4 flex items-center justify-between border-b border-gray-600">
+      <div className="flex items-center space-x-3">
+        <ArrowLeft className="w-5 h-5 cursor-pointer" onClick={onBack} />
+        <h2
+          className="ml-2 text-md font-semibold cursor-pointer"
+          onClick={() => onProfile(otherUser?.id)}
+        >
+          {otherUser?.username || chat.name}
+        </h2>
+      </div>
+      <Trash2
+        className="w-5 h-5 cursor-pointer text-red-400"
+        onClick={() => onDelete(chat.id)}
+      />
+    </div>
+  );
+};
+
+// ✅ Messages left/right
 const Message = ({ msg, userId }) => {
   const isMine = msg.sender_id === userId;
   return (
@@ -344,6 +409,35 @@ const AuthScreen = ({ onLogin }) => {
         {loading ? "Sending..." : "Send Magic Link"}
       </button>
     </form>
+  );
+};
+
+// ✅ Profile Overlay
+const ProfileOverlay = ({ userId, onClose }) => {
+  const [profile, setProfile] = useState(null);
+
+  useEffect(() => {
+    if (userId) {
+      supabase
+        .from("users")
+        .select("username, email")
+        .eq("id", userId)
+        .single()
+        .then(({ data }) => setProfile(data));
+    }
+  }, [userId]);
+
+  if (!profile) return null;
+
+  return (
+    <div className="p-8 flex flex-col space-y-4">
+      <h2 className="text-lg font-bold">Profile</h2>
+      <p className="text-gray-300">Username: {profile.username}</p>
+      <p className="text-gray-300">Email: {profile.email}</p>
+      <button onClick={onClose} className="text-gray-400 mt-4">
+        Close
+      </button>
+    </div>
   );
 };
 
