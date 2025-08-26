@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { supabase } from "./supabaseClient";
 
 export default function App() {
@@ -10,6 +10,14 @@ export default function App() {
   const [activeChat, setActiveChat] = useState(null);
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState("");
+
+  const messagesEndRef = useRef(null);
+  const subscriptionRef = useRef(null);
+
+  // --- Auto-scroll ---
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
 
   // --- Auth ---
   useEffect(() => {
@@ -80,9 +88,16 @@ export default function App() {
     setInvites(invitesWithSenders);
   };
 
-  // --- Chat view ---
+  // --- Open Chat ---
   const openChat = async (chat) => {
     setActiveChat(chat);
+
+    // Clean old subscription
+    if (subscriptionRef.current) {
+      supabase.removeChannel(subscriptionRef.current);
+      subscriptionRef.current = null;
+    }
+
     const { data, error } = await supabase
       .from("messages")
       .select("id, sender_id, text, created_at")
@@ -91,6 +106,7 @@ export default function App() {
 
     if (!error) setMessages(data || []);
 
+    // Subscribe to new messages
     const channel = supabase
       .channel("chat-" + chat.id)
       .on(
@@ -102,9 +118,10 @@ export default function App() {
       )
       .subscribe();
 
-    return () => supabase.removeChannel(channel);
+    subscriptionRef.current = channel;
   };
 
+  // --- Send Message ---
   const sendMessage = async () => {
     if (!newMessage.trim() || !activeChat) return;
 
@@ -121,12 +138,12 @@ export default function App() {
       return;
     }
 
-    // Push message locally so it appears instantly
+    // Add instantly
     setMessages((prev) => [...prev, data]);
     setNewMessage("");
   };
 
-  // --- Invites actions ---
+  // --- Invites ---
   const sendInvite = async () => {
     if (!usernameInput) return;
 
@@ -184,7 +201,7 @@ export default function App() {
     );
   }
 
-  // --- Chat screen ---
+  // --- Active Chat screen ---
   if (activeChat) {
     const otherUser = activeChat.participantsInfo.find((p) => p.id !== session.user.id);
 
@@ -209,6 +226,7 @@ export default function App() {
                 {msg.text}
               </div>
             ))}
+            <div ref={messagesEndRef} />
           </div>
 
           <div className="flex items-center mt-2">
@@ -228,7 +246,7 @@ export default function App() {
     );
   }
 
-  // --- Main app (chat list) ---
+  // --- Chat List ---
   return (
     <div className="flex items-center justify-center h-screen bg-black text-white">
       <div className="w-[420px] min-h-[400px] p-4 bg-gray-900 rounded-2xl shadow-lg border border-gray-800 flex flex-col">
@@ -239,7 +257,6 @@ export default function App() {
           </button>
         </div>
 
-        {/* Chat List */}
         <div className="flex-1 space-y-2 overflow-y-auto">
           {chats.length === 0 && (
             <p className="text-gray-500 text-sm text-center mt-20">
