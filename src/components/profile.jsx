@@ -1,29 +1,71 @@
-import React from "react";
-import { User, Settings } from "lucide-react";
+// src/components/profile.jsx
+import React, { useEffect, useState } from "react";
+import supabase from "../supabaseClient";
+import { useLocation } from "react-router-dom";
 
-const Profile = ({ user }) => {
+export default function Profile({ session }) {
+  const [profile, setProfile] = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const location = useLocation();
+
+  const userId = location.state?.userId ?? session?.user?.id;
+
+  useEffect(() => {
+    if (!userId) return;
+    (async () => {
+      const { data, error } = await supabase.from("profiles").select("*").eq("id", userId).single();
+      if (error) {
+        console.error("fetch profile", error);
+        return;
+      }
+      setProfile(data);
+    })();
+  }, [userId]);
+
+  async function handleFile(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    try {
+      const ext = file.name.split(".").pop();
+      const fileName = `${userId}.${ext}`;
+      const { error: upErr } = await supabase.storage.from("avatars").upload(fileName, file, {
+        upsert: true
+      });
+      if (upErr) throw upErr;
+      const { data } = supabase.storage.from("avatars").getPublicUrl(fileName);
+      // store avatar url in profiles table
+      const { error: updateErr } = await supabase.from("profiles").update({ avatar_url: data.publicUrl }).eq("id", userId);
+      if (updateErr) throw updateErr;
+      setProfile((p) => ({ ...p, avatar_url: data.publicUrl }));
+    } catch (err) {
+      console.error("upload avatar", err);
+      alert("Upload failed: " + err.message);
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  if (!session && !userId) {
+    return <div style={{ padding: 20 }}>Please sign in to view a profile.</div>;
+  }
+
   return (
-    <div className="p-6 text-white bg-black h-screen">
-      <div className="flex items-center space-x-4 mb-6">
-        <div className="w-16 h-16 rounded-full bg-gray-600 flex items-center justify-center">
-          {user.avatar ? (
-            <img src={user.avatar} alt={user.username} className="w-16 h-16 rounded-full" />
-          ) : (
-            <User className="w-8 h-8 text-white" />
-          )}
-        </div>
+    <div style={{ padding: 20 }}>
+      <h2>Profile</h2>
+      {profile ? (
         <div>
-          <h2 className="text-xl font-bold">{user.username}</h2>
-          <p className="text-gray-400">{user.email}</p>
+          <img src={profile.avatar_url || ""} alt="avatar" style={{ width: 120, height: 120, borderRadius: 60, background: "#111" }} />
+          <div style={{ marginTop: 12 }}>
+            <input type="file" onChange={handleFile} disabled={uploading} />
+          </div>
+          <div style={{ marginTop: 12 }}>
+            <strong>{profile.username || profile.full_name || profile.email || "Unnamed"}</strong>
+          </div>
         </div>
-      </div>
-
-      <button className="flex items-center space-x-2 bg-gray-800 px-4 py-2 rounded hover:bg-gray-700">
-        <Settings className="w-5 h-5" />
-        <span>Account Settings</span>
-      </button>
+      ) : (
+        <div>Loading profile…</div>
+      )}
     </div>
   );
-};
-
-export default Profile;
+}
