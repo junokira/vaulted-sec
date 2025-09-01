@@ -84,11 +84,16 @@ export default function App() {
     if (!userProfile) return;
 
     // Realtime subscription for chats
-    const chatChannel = supabase
-      .channel("public:chats")
+    const chatMembersChannel = supabase
+      .channel(`public:chat_members:user:${userProfile.id}`)
       .on(
         "postgres_changes",
-        { event: "INSERT", schema: "public", table: "chats", filter: `participants.cs.{"${userProfile.id}"}` },
+        {
+          event: "*",
+          schema: "public",
+          table: "chat_members",
+          filter: `user_id=eq.${userProfile.id}`,
+        },
         () => loadChats(userProfile.id)
       )
       .subscribe();
@@ -168,7 +173,7 @@ export default function App() {
     typingChannelRef.current = typingChannel;
 
     return () => {
-      supabase.removeChannel(chatChannel);
+      supabase.removeChannel(chatMembersChannel);
       supabase.removeChannel(messagesChannel);
       supabase.removeChannel(receiptsChannel);
       supabase.removeChannel(presenceChannel);
@@ -514,13 +519,16 @@ export default function App() {
         return;
       }
       
-      await loadChats();     // refresh list
-      const { data: profiles } = await supabase.from("profiles").select("id, username, full_name, avatar_url").in("id", chat.participants || []);
-      const chatWithInfo = { ...chat, participantsInfo: profiles || [] };
-      setActiveChat(chatWithInfo);
-
+      // Resolve members for this chat
+      const { data: memberRows, error: mrErr } = await supabase
+        .from("chat_members").select("user_id").eq("chat_id", chat.id);
+      if (mrErr) console.error(mrErr);
+      const memberIds = (memberRows || []).map(r => r.user_id);
+      const { data: profiles } = await supabase
+        .from("profiles").select("id, username, full_name, avatar_url").in("id", memberIds);
+      setActiveChat({ ...chat, participantsInfo: profiles || [] });
+      await loadChats(session.user.id); // refresh list for ordering/unreads
       await loadInvites(session.user.id);
-      await loadChats(session.user.id);
     } catch (err) {
       console.error("acceptInvite err:", err);
       alert("Failed to accept invite. See console.");
