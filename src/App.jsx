@@ -930,6 +930,7 @@ function AddContactPanel({ onClose, onSendInvite, invites = [], onAccept, onDeny
 
 function InitialProfileSetup({ user, onProfileCreate }) {
   const [username, setUsername] = useState("");
+  const [fullName, setFullName] = useState("");
   const [updating, setUpdating] = useState(false);
 
   async function handleCreate(e) {
@@ -938,6 +939,7 @@ function InitialProfileSetup({ user, onProfileCreate }) {
     const updates = {
       id: user.id,
       username,
+      full_name: fullName,
     };
     const result = await onProfileCreate(updates);
     if (result.success) {
@@ -962,6 +964,16 @@ function InitialProfileSetup({ user, onProfileCreate }) {
             onChange={(e) => setUsername(e.target.value)}
             className="w-full p-3 rounded bg-gray-800 border border-gray-700 text-white"
             required
+          />
+        </div>
+        <div className="mb-3">
+          <label htmlFor="fullName" className="text-sm block mb-1">Full Name</label>
+          <input
+            id="fullName"
+            type="text"
+            value={fullName}
+            onChange={(e) => setFullName(e.target.value)}
+            className="w-full p-3 rounded bg-gray-800 border border-gray-700 text-white"
           />
         </div>
         <div className="flex gap-3 mt-4">
