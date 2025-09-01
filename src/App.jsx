@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef } from "react";
 import { createClient } from "@supabase/supabase-js";
-import { ArrowLeft, Plus, Settings, Search, Paperclip, Smile } from "lucide-react";
+import { ArrowLeft, Plus, Settings } from "lucide-react";
 
 /* -------------------------
   Supabase client (env)
@@ -34,10 +34,6 @@ export default function App() {
   const [typing, setTyping] = useState({});
   const [presence, setPresence] = useState([]);
   const [receipts, setReceipts] = useState({});
-  const [reactions, setReactions] = useState({});
-  const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState([]);
-  const [loadingSearch, setLoadingSearch] = useState(false);
 
   const messageChannelRef = useRef(null);
   const typingChannelRef = useRef(null);
@@ -140,16 +136,6 @@ export default function App() {
       )
       .subscribe();
 
-    // Realtime subscription for reactions
-    const reactionsChannel = supabase
-      .channel("public:message_reactions")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "message_reactions" },
-        () => fetchReactions()
-      )
-      .subscribe();
-
     // Presence & Typing channels
     const presenceChannel = supabase.channel("presence", {
       config: { presence: { key: userProfile.id } },
@@ -183,7 +169,6 @@ export default function App() {
       supabase.removeChannel(chatChannel);
       supabase.removeChannel(messagesChannel);
       supabase.removeChannel(receiptsChannel);
-      supabase.removeChannel(reactionsChannel);
       supabase.removeChannel(presenceChannel);
       supabase.removeChannel(typingChannel);
     };
@@ -204,30 +189,6 @@ export default function App() {
     
     setLoadingMessages(true);
     fetchMessages(activeChat.id).then(() => setLoadingMessages(false));
-    fetchReactions();
-    
-    // Per-chat message subscription
-    const channel = supabase
-      .channel(`chat:${activeChat.id}`)
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages", filter: `chat_id=eq.${activeChat.id}` }, (payload) => {
-        setMessages(prev => [...prev, payload.new]);
-      })
-      .subscribe();
-
-    const typingChannel = supabase.channel(`typing:${activeChat.id}`);
-    typingChannel
-      .on("broadcast", { event: "typing" }, (payload) => {
-        setTyping((prev) => ({ ...prev, [payload.payload.userId]: true }));
-        setTimeout(() => setTyping((prev) => ({ ...prev, [payload.payload.userId]: false })), 2000);
-      })
-      .subscribe();
-    
-    typingChannelRef.current = typingChannel;
-
-    return () => {
-      supabase.removeChannel(channel);
-      supabase.removeChannel(typingChannel);
-    };
   }, [activeChat, session]);
 
   useEffect(() => {
@@ -315,7 +276,7 @@ export default function App() {
       // Step 1: Fetch chats for the current user, along with a single message for sorting
       const { data, error: chatsError } = await supabase
         .from("chats")
-        .select("*, messages(id, text, created_at, sender_id)")
+        .select("*, messages(created_at, sender_id)")
         .contains("participants", [id]);
 
       if (chatsError) {
@@ -402,7 +363,7 @@ export default function App() {
     try {
       const { data, error } = await supabase
         .from("messages")
-        .select("id, chat_id, sender_id, text, content, created_at, type, reply_to, profiles:sender_id(id, username, avatar_url)")
+        .select("id, chat_id, sender_id, text, created_at, profiles(id, username, avatar_url)")
         .eq("chat_id", chatId)
         .order("created_at", { ascending: true });
 
@@ -419,25 +380,22 @@ export default function App() {
   }
 
   /* --- Send message --- */
-  async function sendMessage(chatId, text, type = 'text', content = null, replyTo = null) {
-    if (!chatId || (!text?.trim() && !content) || !session) return;
+  async function sendMessage(chatId, text) {
+    if (!chatId || !text?.trim() || !session) return;
     try {
       const tempId = `temp-${Date.now()}-${Math.random()}`;
       const tempMessage = {
         id: tempId,
         chat_id: chatId,
         sender_id: session.user.id,
-        text: text?.trim() || null,
-        type,
-        content,
-        reply_to: replyTo,
+        text: text.trim(),
         created_at: new Date().toISOString(),
         profiles: { id: session.user.id, username: userProfile.username, avatar_url: userProfile.avatar_url },
       };
       setMessages(prev => [...prev, tempMessage]);
       
       const { data, error } = await supabase.from("messages").insert([
-        { chat_id: chatId, sender_id: session.user.id, text: text?.trim() || null, type, content, reply_to: replyTo },
+        { chat_id: chatId, sender_id: session.user.id, text: text.trim() },
       ]).select();
 
       if (error) {
@@ -457,34 +415,6 @@ export default function App() {
       throw err;
     }
   }
-
-  async function handleFileUpload(file) {
-    if (!file || !session) return;
-    
-    try {
-      const fileExt = file.name.split('.').pop();
-      const fileName = `${Date.now()}-${Math.random()}.${fileExt}`;
-      const filePath = `${session.user.id}/${fileName}`;
-      
-      const { data, error } = await supabase.storage
-        .from('chat-media')
-        .upload(filePath, file, { upsert: false });
-
-      if (error) throw error;
-
-      const { data: publicUrlData } = supabase.storage
-        .from('chat-media')
-        .getPublicUrl(filePath);
-
-      const fileType = file.type.startsWith('image/') ? 'image' : file.type.startsWith('audio/') ? 'audio' : 'file';
-      
-      await sendMessage(activeChat.id, null, fileType, publicUrlData.publicUrl);
-
-    } catch (error) {
-      console.error("File upload error:", error);
-      alert("Failed to upload file.");
-    }
-  }
   
   function sendTypingEvent() {
     if (typingChannelRef.current) {
@@ -494,74 +424,6 @@ export default function App() {
         payload: { userId: session.user.id, username: userProfile.username },
       });
     }
-  }
-  
-  async function fetchReactions() {
-    try {
-      const { data, error } = await supabase
-        .from("message_reactions")
-        .select("message_id, emoji, count:count()");
-
-      if (error) throw error;
-
-      const aggregatedReactions = data.reduce((acc, curr) => {
-        if (!acc[curr.message_id]) {
-          acc[curr.message_id] = [];
-        }
-        acc[curr.message_id].push({ emoji: curr.emoji, count: curr.count });
-        return acc;
-      }, {});
-
-      setReactions(aggregatedReactions);
-    } catch (err) {
-      console.error("Failed to fetch reactions:", err);
-    }
-  }
-
-  async function addReaction(messageId, emoji) {
-    if (!session || !messageId || !emoji) return;
-    try {
-      await supabase.from("message_reactions").upsert({
-        message_id: messageId,
-        user_id: session.user.id,
-        emoji,
-      });
-      // The realtime subscription will handle re-fetching reactions
-    } catch (error) {
-      console.error("Failed to add reaction:", error);
-    }
-  }
-  
-  async function performSearch() {
-    if (!searchQuery.trim()) {
-      setSearchResults([]);
-      return;
-    }
-    setLoadingSearch(true);
-    try {
-      const { data, error } = await supabase
-        .from("messages")
-        .select("*, profiles!messages(id, username)")
-        .textSearch("text", searchQuery, { config: "english" });
-
-      if (error) throw error;
-      
-      setSearchResults(data || []);
-    } catch (err) {
-      console.error("Search failed:", err);
-      setSearchResults([]);
-    } finally {
-      setLoadingSearch(false);
-    }
-  }
-
-  function getMessageSnippet(messageId) {
-    const message = messages.find(m => m.id === messageId);
-    if (!message) return 'original message';
-    if (message.type === 'image') return 'Image';
-    if (message.type === 'audio') return 'Audio file';
-    if (message.type === 'file') return 'File';
-    return message.text?.substring(0, 30) + '...';
   }
 
   /* --- Robust chat finder/creator --- */
@@ -762,8 +624,8 @@ export default function App() {
   }
 
   return (
-    <div className="bg-black min-h-screen flex flex-col font-sans text-gray-300 p-4">
-      <div className="w-full max-w-lg mx-auto h-[90vh] md:h-[90vh] bg-gray-900 rounded-3xl overflow-hidden shadow-2xl ring-2 ring-gray-700 flex flex-col">
+    <div className="bg-black min-h-screen flex items-center justify-center font-sans text-gray-300 p-4">
+      <div className="w-full max-w-lg mx-auto bg-gray-900 rounded-3xl overflow-hidden shadow-2xl ring-2 ring-gray-700">
         {/* Header */}
         <div className="bg-black/80 p-4 flex items-center justify-between border-b border-gray-700">
           <div className="flex items-center gap-4">
@@ -784,63 +646,23 @@ export default function App() {
         </div>
 
         {/* Content */}
-        <div className="p-4 flex-1 flex flex-col">
+        <div className="p-4">
           {!activeChat ? (
             <div>
-              {/* Search Bar */}
-              <div className="relative mb-4">
-                <input
-                  type="text"
-                  placeholder="Search messages..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && performSearch()}
-                  className="w-full p-3 pl-10 rounded-lg bg-gray-800 text-gray-200 border border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
-                <Search className="w-5 h-5 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
-              </div>
-
-              {/* Search Results */}
-              {loadingSearch && <div className="text-sm text-gray-500 text-center">Searching...</div>}
-              {searchResults.length > 0 && (
-                <div className="mb-4">
-                  <h4 className="text-sm font-semibold text-gray-300 mb-2">Search Results</h4>
-                  <div className="space-y-2 max-h-40 overflow-y-auto">
-                    {searchResults.map((result) => (
-                      <div
-                        key={result.id}
-                        className="p-3 bg-gray-800 rounded-xl cursor-pointer hover:bg-gray-700"
-                        onClick={() => setActiveChat(chats.find(c => c.id === result.chat_id))}
-                      >
-                        <div className="text-sm font-semibold">{result.profiles?.username || 'Unknown'}</div>
-                        <div className="text-xs text-gray-400">{result.text.substring(0, 100)}...</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
               <div className="space-y-3">
                 {loadingChats && <div className="text-sm text-gray-500">Loading chats…</div>}
                 {!loadingChats && chats.length === 0 && <div className="text-sm text-gray-500">No chats yet. Click + to add a contact.</div>}
                 {chats.map((chat) => {
                   const otherUser = getOtherParticipant(chat);
-                  const lastMessage = chat.messages?.[0];
                   return (
                     <div key={chat.id} onClick={() => setActiveChat(chat)} className="p-3 rounded-xl bg-gray-800 hover:bg-gray-700 cursor-pointer flex items-center gap-3">
                       <img
                         src={otherUser?.avatar_url || "/default-avatar.png"}
-                        onError={(e) => { e.target.src = "/default-avatar.png"; }}
                         className="w-10 h-10 rounded-full"
                         alt="Avatar"
                       />
                       <div className="flex-1">
                         <div className="text-gray-200">{otherParticipantName(chat)}</div>
-                        {lastMessage && (
-                          <div className="text-xs text-gray-400">
-                            {lastMessage.text ? lastMessage.text.substring(0, 30) + (lastMessage.text.length > 30 ? '...' : '') : 'Media'}
-                          </div>
-                        )}
                       </div>
                       {unreadCounts[chat.id] > 0 && (
                         <div className="bg-red-600 text-white text-xs px-2 py-0.5 rounded-full">
@@ -865,10 +687,6 @@ export default function App() {
               typing={typing}
               presence={presence}
               receipts={receipts}
-              reactions={reactions}
-              addReaction={addReaction}
-              getMessageSnippet={getMessageSnippet}
-              handleFileUpload={handleFileUpload}
             />
           )}
         </div>
@@ -969,7 +787,7 @@ function AuthPanel({ onSignInWithMagicLink, onSignInWithPassword }) {
   );
 }
 
-function ChatWindow({ chat, messages, onBack, onSend, loadingMessages, session, userProfile, typing, presence, receipts, reactions, addReaction, getMessageSnippet, handleFileUpload }) {
+function ChatWindow({ chat, messages, onBack, onSend, loadingMessages, session, userProfile, typing, presence, receipts, sendTypingEvent }) {
   const [text, setText] = useState("");
   const messagesEndRef = useRef();
 
@@ -985,8 +803,6 @@ function ChatWindow({ chat, messages, onBack, onSend, loadingMessages, session, 
     return presence[userId]?.[0] || null;
   };
   const otherPresence = getPresence(otherParticipant?.id);
-  
-  const [replyToMessage, setReplyToMessage] = useState(null);
 
   return (
     <div className="flex flex-col h-[60vh] md:h-[70vh]">
@@ -996,7 +812,6 @@ function ChatWindow({ chat, messages, onBack, onSend, loadingMessages, session, 
         </button>
         <img
           src={otherParticipant?.avatar_url || "/default-avatar.png"}
-          onError={(e) => { e.target.src = "/default-avatar.png"; }}
           className="w-10 h-10 rounded-full"
           alt="Avatar"
         />
@@ -1017,36 +832,15 @@ function ChatWindow({ chat, messages, onBack, onSend, loadingMessages, session, 
           messages && messages.length === 0 ? (
             <div className="text-sm text-gray-500 mt-6 text-center">No messages yet — say hi 👋</div>
           ) : (
-            (messages || []).map(m => (
-              <MessageBubble
-                key={m.id}
-                msg={m}
-                isSender={m.sender_id === session.user.id}
-                receipts={receipts[m.id]}
-                reactions={reactions[m.id]}
-                addReaction={addReaction}
-                getMessageSnippet={getMessageSnippet}
-                onReply={() => setReplyToMessage(m)}
-              />
-            ))
+            (messages || []).map(m => <MessageBubble key={m.id} msg={m} isSender={m.sender_id === session.user.id} receipts={receipts[m.id]} />)
           )
         )}
         <div ref={messagesEndRef} />
       </div>
       
       {isTyping && <div className="text-sm text-gray-400 pl-3">{otherParticipant?.username || 'Someone'} is typing...</div>}
-      {replyToMessage && (
-        <div className="bg-gray-800 border-l-4 border-gray-600 p-2 text-sm text-gray-400 flex items-center justify-between mt-2">
-          <div>Replying to: {getMessageSnippet(replyToMessage.id)}</div>
-          <button onClick={() => setReplyToMessage(null)} className="text-gray-500 hover:text-white">✕</button>
-        </div>
-      )}
 
       <div className="mt-3 flex items-center gap-3">
-        <label htmlFor="file-upload" className="p-2 rounded-full bg-gray-700 hover:bg-gray-600 cursor-pointer">
-          <Paperclip className="w-5 h-5" />
-          <input id="file-upload" type="file" accept="image/*,audio/*,application/pdf" className="hidden" onChange={(e) => handleFileUpload(e.target.files[0])} />
-        </label>
         <input value={text} onChange={(e) => {
           setText(e.target.value);
           sendTypingEvent();
@@ -1054,99 +848,42 @@ function ChatWindow({ chat, messages, onBack, onSend, loadingMessages, session, 
           if (e.key === "Enter") {
             const v = text.trim();
             if (!v) return;
-            onSend(chat.id, v, 'text', null, replyToMessage?.id);
+            onSend(chat.id, v).catch(() => {});
             setText("");
-            setReplyToMessage(null);
           }
         }} className="flex-1 p-3 bg-gray-800 rounded-xl text-base text-gray-200" placeholder="Type a message..." />
         <button onClick={() => {
           const v = text.trim();
           if (!v) return;
-          onSend(chat.id, v, 'text', null, replyToMessage?.id);
+          onSend(chat.id, v).catch(() => {});
           setText("");
-          setReplyToMessage(null);
         }} className="px-4 py-2 bg-gray-700 rounded-lg text-sm hover:bg-gray-600">Send</button>
       </div>
     </div>
   );
 }
 
-function MessageBubble({ msg, isSender, receipts, reactions, addReaction, getMessageSnippet, onReply }) {
-  const [showReactions, setShowReactions] = useState(false);
+function MessageBubble({ msg, isSender, receipts }) {
   const isReadByAll = receipts?.filter(r => r.status === 'read').length === 2;
-
-  const renderContent = () => {
-    if (msg.type === 'image') {
-      return <img src={msg.content} className="max-w-xs rounded-lg" alt="Sent media" />;
-    }
-    if (msg.type === 'audio') {
-      return <audio controls src={msg.content} className="w-full" />;
-    }
-    if (msg.type === 'file') {
-      return <a href={msg.content} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline">Download file</a>;
-    }
-    return <div>{msg.text}</div>;
-  };
-  
-  const handleAddReaction = (emoji) => {
-    addReaction(msg.id, emoji);
-    setShowReactions(false);
-  };
-  
-  const availableEmojis = ['👍', '❤️', '😂', '😮', '😢', '🔥', '🎉'];
 
   return (
     <div className={`flex ${isSender ? 'justify-end' : 'justify-start'}`}>
       <div className={`flex items-end gap-2 ${isSender ? 'flex-row-reverse' : ''}`}>
         <img
           src={msg.profiles?.avatar_url || "/default-avatar.png"}
-          onError={(e) => { e.target.src = "/default-avatar.png"; }}
           className="w-8 h-8 rounded-full"
           alt="Avatar"
         />
-        <div className="group relative">
-          <div
-            className={`max-w-[80%] p-3 rounded-2xl text-sm ${isSender ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-200'}`}
-            onMouseEnter={() => setShowReactions(true)}
-            onMouseLeave={() => setShowReactions(false)}
-          >
-            <div className="font-semibold text-xs text-gray-400 mb-1">{isSender ? "You" : (msg.profiles?.username || "Unknown")}</div>
-            {msg.reply_to && (
-              <div className="text-xs text-gray-500 border-l-2 pl-2 mb-1">
-                ↪ Replying to: {getMessageSnippet(msg.reply_to)}
-              </div>
+        <div className={`max-w-[80%] p-3 rounded-2xl text-sm ${isSender ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-200'}`}>
+          <div className="font-semibold text-xs text-gray-400 mb-1">{isSender ? "You" : (msg.profiles?.username || "Unknown")}</div>
+          <div className="text-sm">{msg.text}</div>
+          <div className="text-xs text-gray-400 mt-1 flex justify-end items-center gap-1">
+            {new Date(msg.created_at).toLocaleTimeString()}
+            {isSender && (
+              <span>
+                {isReadByAll ? "✓✓" : "✓"}
+              </span>
             )}
-            {renderContent()}
-            
-            {reactions?.length > 0 && (
-              <div className="flex gap-1 mt-1">
-                {reactions.map((r) => (
-                  <span key={r.emoji} className="px-1 bg-gray-700 rounded-full text-xs">
-                    {r.emoji} {r.count}
-                  </span>
-                ))}
-              </div>
-            )}
-            
-            <div className="text-xs text-gray-400 mt-1 flex justify-end items-center gap-1">
-              {new Date(msg.created_at).toLocaleTimeString()}
-              {isSender && (
-                <span>
-                  {isReadByAll ? "✓✓" : "✓"}
-                </span>
-              )}
-            </div>
-          </div>
-          
-          <div className={`absolute -top-8 flex gap-1 bg-gray-700 p-1 rounded-full ${isSender ? 'right-0' : 'left-0'} transition-opacity ${showReactions ? 'opacity-100' : 'opacity-0'}`}>
-            {availableEmojis.map(emoji => (
-              <button key={emoji} onClick={() => handleAddReaction(emoji)} className="p-1 hover:bg-gray-600 rounded-full text-lg">
-                {emoji}
-              </button>
-            ))}
-            <button onClick={onReply} className="p-1 hover:bg-gray-600 rounded-full">
-              <ArrowLeft className="w-4 h-4 text-gray-300 rotate-180" />
-            </button>
           </div>
         </div>
       </div>
