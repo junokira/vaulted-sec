@@ -1,8 +1,6 @@
 import React, { useEffect, useState, useRef } from "react";
 import { createClient } from "@supabase/supabase-js";
 import { ArrowLeft, Plus, Settings } from "lucide-react";
-import Picker from '@emoji-mart/react';
-import data from '@emoji-mart/data';
 
 /* -------------------------
   Supabase client (env)
@@ -83,7 +81,7 @@ export default function App() {
   useEffect(() => {
     if (!userProfile) return;
 
-    // Realtime subscription for chats
+    // Realtime subscription for chat memberships
     const chatMembersChannel = supabase
       .channel(`public:chat_members:user:${userProfile.id}`)
       .on(
@@ -273,53 +271,53 @@ export default function App() {
   async function loadChats(userId) {
     try {
       setLoadingChats(true);
-  
-      // 1) my memberships
+      
+      // 1) Fetch my chat memberships
       const { data: memberRows, error: mErr } = await supabase
         .from('chat_members')
         .select('chat_id')
         .eq('user_id', userId);
-  
+
       if (mErr) throw mErr;
       const chatIds = [...new Set((memberRows || []).map(r => r.chat_id))];
       if (chatIds.length === 0) { setChats([]); return; }
-  
-      // 2) chats
+
+      // 2) Fetch chats using the IDs
       const { data: chatRows, error: cErr } = await supabase
         .from('chats')
         .select('id, is_group, name, created_at')
         .in('id', chatIds);
       if (cErr) throw cErr;
-  
-      // 3) latest messages (for ordering)
+
+      // 3) Fetch latest messages to sort chats by recent activity
       const { data: msgRows, error: lErr } = await supabase
         .from('messages')
         .select('id, chat_id, text, created_at, sender_id')
         .in('chat_id', chatIds)
         .order('created_at', { ascending: false });
       if (lErr) throw lErr;
-  
+
       const latestByChat = {};
       for (const m of msgRows || []) {
         if (!latestByChat[m.chat_id]) latestByChat[m.chat_id] = m;
       }
-  
-      // 4) all members → profiles
+
+      // 4) Fetch all members for all my chats to get their profiles
       const { data: allMembers, error: memErr } = await supabase
         .from('chat_members')
         .select('chat_id, user_id')
         .in('chat_id', chatIds);
       if (memErr) throw memErr;
-  
+
       const userIds = [...new Set((allMembers || []).map(r => r.user_id))];
       const { data: profiles, error: pErr } = await supabase
         .from('profiles')
         .select('id, username, full_name, avatar_url')
         .in('id', userIds);
       if (pErr) throw pErr;
-  
+
       const profileMap = Object.fromEntries((profiles || []).map(p => [p.id, p]));
-  
+
       const enriched = (chatRows || []).map(c => ({
         ...c,
         lastMessage: latestByChat[c.id] || null,
@@ -332,7 +330,7 @@ export default function App() {
         const tb = b.lastMessage?.created_at || b.created_at;
         return new Date(tb) - new Date(ta);
       });
-  
+
       setChats(enriched);
     } catch (e) {
       console.error('loadChats error', e);
@@ -446,15 +444,15 @@ export default function App() {
   async function getOrCreateChatWith(participantId, displayName) {
     if (!session || !participantId) return null;
     const me = session.user.id;
-  
+
     const { data: chat, error } = await supabase
       .rpc('get_or_create_dm', { p_user1: me, p_user2: participantId });
-  
+
     if (error) {
       console.error('get_or_create_dm error:', error);
       return null;
     }
-  
+
     // Optionally decorate the returned chat with name/avatar for UI purposes
     return { ...chat, name: displayName || chat.name || null };
   }
@@ -511,17 +509,14 @@ export default function App() {
         });
         return;
       }
-      
-      // Resolve members for this chat
-      const { data: memberRows, error: mrErr } = await supabase
-        .from("chat_members").select("user_id").eq("chat_id", chat.id);
-      if (mrErr) console.error(mrErr);
-      const memberIds = (memberRows || []).map(r => r.user_id);
-      const { data: profiles } = await supabase
-        .from("profiles").select("id, username, full_name, avatar_url").in("id", memberIds);
-      setActiveChat({ ...chat, participantsInfo: profiles || [] });
-      await loadChats(session.user.id); // refresh list for ordering/unreads
+
+      const { data: profiles } = await supabase.from("profiles").select("id, username, full_name, avatar_url").in("id", chat.participants || []);
+      const chatWithInfo = { ...chat, participantsInfo: profiles || [] };
+
+      setActiveChat(chatWithInfo);
+
       await loadInvites(session.user.id);
+      await loadChats(session.user.id);
     } catch (err) {
       console.error("acceptInvite err:", err);
       alert("Failed to accept invite. See console.");
@@ -784,7 +779,6 @@ function AuthPanel({ onSignInWithMagicLink, onSignInWithPassword }) {
 
 function ChatWindow({ chat, messages, onBack, onSend, loadingMessages, session, userProfile, typing, presence, receipts, sendTypingEvent }) {
   const [text, setText] = useState("");
-  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const messagesEndRef = useRef();
 
   useEffect(() => {
@@ -799,10 +793,6 @@ function ChatWindow({ chat, messages, onBack, onSend, loadingMessages, session, 
     return presence[userId]?.[0] || null;
   };
   const otherPresence = getPresence(otherParticipant?.id);
-  
-  const handleEmojiSelect = (emoji) => {
-    setText(prevText => prevText + emoji.native);
-  };
 
   return (
     <div className="flex flex-col h-[60vh] md:h-[70vh]">
@@ -859,14 +849,6 @@ function ChatWindow({ chat, messages, onBack, onSend, loadingMessages, session, 
           setText("");
         }} className="px-4 py-2 bg-gray-700 rounded-lg text-sm hover:bg-gray-600">Send</button>
       </div>
-
-      {showEmojiPicker && (
-        <div className="relative mt-3">
-          <div className="absolute bottom-0 right-0 z-10">
-            <Picker data={data} onEmojiSelect={handleEmojiSelect} theme="dark" />
-          </div>
-        </div>
-      )}
     </div>
   );
 }
