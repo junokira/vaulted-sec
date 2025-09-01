@@ -271,57 +271,73 @@ export default function App() {
 
   /* --- Chats & Invites load --- */
   async function loadChats(userId) {
-    const id = userId || session?.user.id;
+    const id = userId || session?.user?.id;
     if (!id) return;
     setLoadingChats(true);
+  
     try {
-      // Step 1: Fetch chats for the current user, along with a single message for sorting
-      const { data, error: chatsError } = await supabase
-        .from("chats")
-        .select("*, messages(created_at, sender_id)")
-        .contains("participants", [id]);
-
-      if (chatsError) {
-        throw chatsError;
+      // 1) My membership rows -> chat ids
+      const { data: memberRows, error: mErr } = await supabase
+        .from('chat_members')
+        .select('chat_id')
+        .eq('user_id', id);
+      if (mErr) throw mErr;
+  
+      const chatIds = (memberRows || []).map(r => r.chat_id);
+      if (chatIds.length === 0) { setChats([]); return; }
+  
+      // 2) Basic chat rows
+      const { data: chatsData, error: cErr } = await supabase
+        .from('chats')
+        .select('id, name')
+        .in('id', chatIds);
+      if (cErr) throw cErr;
+  
+      // 3) Latest messages for sorting
+      const { data: allMsgs, error: msgErr } = await supabase
+        .from('messages')
+        .select('id, chat_id, sender_id, created_at')
+        .in('chat_id', chatIds)
+        .order('created_at', { ascending: false });
+      if (msgErr) throw msgErr;
+  
+      const latestByChat = {};
+      for (const m of allMsgs || []) {
+        if (!latestByChat[m.chat_id]) latestByChat[m.chat_id] = m; // first is latest due to order
       }
-
-      const chats = data || [];
-
-      // Step 2: Get all unique participant IDs from the fetched chats
-      const allParticipantIds = new Set();
-      chats.forEach(chat => {
-        chat.participants.forEach(pId => allParticipantIds.add(pId));
+  
+      // 4) Participants per chat -> profile infos
+      const { data: participantsRows, error: pErr } = await supabase
+        .from('chat_members')
+        .select('chat_id, user_id')
+        .in('chat_id', chatIds);
+      if (pErr) throw pErr;
+  
+      const userIds = [...new Set((participantsRows || []).map(r => r.user_id))];
+      const { data: profiles, error: profErr } = await supabase
+        .from('profiles')
+        .select('id, username, full_name, avatar_url')
+        .in('id', userIds);
+      if (profErr) throw profErr;
+  
+      const profileMap = new Map((profiles || []).map(p => [p.id, p]));
+  
+      const enriched = (chatsData || []).map(c => {
+        const memberIds = (participantsRows || []).filter(r => r.chat_id === c.id).map(r => r.user_id);
+        return {
+          ...c,
+          participantsInfo: memberIds.map(uid => profileMap.get(uid)).filter(Boolean),
+          lastMessage: latestByChat[c.id] || null,
+        };
+      }).sort((a, b) => {
+        const at = new Date(a.lastMessage?.created_at || 0).getTime();
+        const bt = new Date(b.lastMessage?.created_at || 0).getTime();
+        return bt - at;
       });
-
-      // Step 3: Fetch all profiles for these participants in a single query
-      const { data: profilesData, error: profilesError } = await supabase
-        .from("profiles")
-        .select("id, username, full_name, avatar_url")
-        .in("id", Array.from(allParticipantIds));
-
-      if (profilesError) {
-        throw profilesError;
-      }
-      const profilesMap = new Map(profilesData?.map(p => [p.id, p]));
-
-      // Step 4: Map profiles to each chat & sort
-      const chatsWithProfiles = chats.map(chat => ({
-        ...chat,
-        participantsInfo: chat.participants.map(pId => profilesMap.get(pId) || { id: pId, username: "Unknown" }),
-        // Sort messages descending to get the latest one
-        messages: chat.messages.sort((a, b) => new Date(b.created_at) - new Date(a.created_at)),
-      }));
-
-      // Sort chats by latest message
-      const sorted = chatsWithProfiles.sort((a, b) => {
-        const aTime = a.messages?.[0]?.created_at ? new Date(a.messages[0].created_at).getTime() : 0;
-        const bTime = b.messages?.[0]?.created_at ? new Date(b.messages[0].created_at).getTime() : 0;
-        return bTime - aTime;
-      });
-
-      setChats(sorted);
-    } catch (err) {
-      console.error("loadChats err", err);
+  
+      setChats(enriched);
+    } catch (e) {
+      console.error('loadChats err', e);
       setChats([]);
     } finally {
       setLoadingChats(false);
@@ -432,41 +448,17 @@ export default function App() {
   async function getOrCreateChatWith(participantId, displayName) {
     if (!session || !participantId) return null;
     const me = session.user.id;
-
-    try {
-      const { data: candidateChats, error: candErr } = await supabase
-        .from("chats")
-        .select("id, name, participants")
-        .contains("participants", [me]);
-
-      if (candErr) {
-        console.error("getOrCreateChatWith - candidate fetch error:", candErr);
-      }
-
-      const found = (candidateChats || []).find((c) => c.participants.includes(participantId) && c.participants.length === 2);
-
-      if (found) {
-        await loadChats(session.user.id);
-        return found;
-      }
-
-      const { data: inserted, error: insertErr } = await supabase
-        .from("chats")
-        .insert([{ name: displayName || null, participants: [me, participantId] }])
-        .select()
-        .single();
-
-      if (insertErr) {
-        console.error("getOrCreateChatWith - insert err:", insertErr);
-        return null;
-      }
-
-      await loadChats(session.user.id);
-      return inserted;
-    } catch (err) {
-      console.error("getOrCreateChatWith err:", err);
+  
+    const { data: chat, error } = await supabase
+      .rpc('get_or_create_dm', { p_user1: me, p_user2: participantId });
+  
+    if (error) {
+      console.error('get_or_create_dm error:', error);
       return null;
     }
+  
+    // Optionally decorate the returned chat with name/avatar for UI purposes
+    return { ...chat, name: displayName || chat.name || null };
   }
 
   /* --- Invites: send / accept / deny --- */
@@ -521,10 +513,10 @@ export default function App() {
         });
         return;
       }
-
+      
+      await loadChats();     // refresh list
       const { data: profiles } = await supabase.from("profiles").select("id, username, full_name, avatar_url").in("id", chat.participants || []);
       const chatWithInfo = { ...chat, participantsInfo: profiles || [] };
-
       setActiveChat(chatWithInfo);
 
       await loadInvites(session.user.id);
