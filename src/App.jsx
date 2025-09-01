@@ -87,17 +87,12 @@ export default function App() {
     const chatMembersChannel = supabase
       .channel(`public:chat_members:user:${userProfile.id}`)
       .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "chat_members",
-          filter: `user_id=eq.${userProfile.id}`,
-        },
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'chat_members', filter: `user_id=eq.${userProfile.id}` },
         () => loadChats(userProfile.id)
       )
       .subscribe();
-
+      
     // Realtime subscription for messages & unread counts
     const messagesChannel = supabase
       .channel("public:messages")
@@ -276,73 +271,71 @@ export default function App() {
 
   /* --- Chats & Invites load --- */
   async function loadChats(userId) {
-    const id = userId || session?.user?.id;
-    if (!id) return;
-    setLoadingChats(true);
-  
     try {
-      // 1) My membership rows -> chat ids
+      setLoadingChats(true);
+  
+      // 1) my memberships
       const { data: memberRows, error: mErr } = await supabase
         .from('chat_members')
         .select('chat_id')
-        .eq('user_id', id);
-      if (mErr) throw mErr;
+        .eq('user_id', userId);
   
-      const chatIds = (memberRows || []).map(r => r.chat_id);
+      if (mErr) throw mErr;
+      const chatIds = [...new Set((memberRows || []).map(r => r.chat_id))];
       if (chatIds.length === 0) { setChats([]); return; }
   
-      // 2) Basic chat rows
-      const { data: chatsData, error: cErr } = await supabase
+      // 2) chats
+      const { data: chatRows, error: cErr } = await supabase
         .from('chats')
-        .select('id, name')
+        .select('id, is_group, name, created_at')
         .in('id', chatIds);
       if (cErr) throw cErr;
   
-      // 3) Latest messages for sorting
-      const { data: allMsgs, error: msgErr } = await supabase
+      // 3) latest messages (for ordering)
+      const { data: msgRows, error: lErr } = await supabase
         .from('messages')
-        .select('id, chat_id, sender_id, created_at')
+        .select('id, chat_id, text, created_at, sender_id')
         .in('chat_id', chatIds)
         .order('created_at', { ascending: false });
-      if (msgErr) throw msgErr;
+      if (lErr) throw lErr;
   
       const latestByChat = {};
-      for (const m of allMsgs || []) {
-        if (!latestByChat[m.chat_id]) latestByChat[m.chat_id] = m; // first is latest due to order
+      for (const m of msgRows || []) {
+        if (!latestByChat[m.chat_id]) latestByChat[m.chat_id] = m;
       }
   
-      // 4) Participants per chat -> profile infos
-      const { data: participantsRows, error: pErr } = await supabase
+      // 4) all members → profiles
+      const { data: allMembers, error: memErr } = await supabase
         .from('chat_members')
         .select('chat_id, user_id')
         .in('chat_id', chatIds);
-      if (pErr) throw pErr;
+      if (memErr) throw memErr;
   
-      const userIds = [...new Set((participantsRows || []).map(r => r.user_id))];
-      const { data: profiles, error: profErr } = await supabase
+      const userIds = [...new Set((allMembers || []).map(r => r.user_id))];
+      const { data: profiles, error: pErr } = await supabase
         .from('profiles')
         .select('id, username, full_name, avatar_url')
         .in('id', userIds);
-      if (profErr) throw profErr;
+      if (pErr) throw pErr;
   
-      const profileMap = new Map((profiles || []).map(p => [p.id, p]));
+      const profileMap = Object.fromEntries((profiles || []).map(p => [p.id, p]));
   
-      const enriched = (chatsData || []).map(c => {
-        const memberIds = (participantsRows || []).filter(r => r.chat_id === c.id).map(r => r.user_id);
-        return {
-          ...c,
-          participantsInfo: memberIds.map(uid => profileMap.get(uid)).filter(Boolean),
-          lastMessage: latestByChat[c.id] || null,
-        };
-      }).sort((a, b) => {
-        const at = new Date(a.lastMessage?.created_at || 0).getTime();
-        const bt = new Date(b.lastMessage?.created_at || 0).getTime();
-        return bt - at;
+      const enriched = (chatRows || []).map(c => ({
+        ...c,
+        lastMessage: latestByChat[c.id] || null,
+        participantsInfo: (allMembers || [])
+          .filter(m => m.chat_id === c.id)
+          .map(m => profileMap[m.user_id])
+          .filter(Boolean),
+      })).sort((a, b) => {
+        const ta = a.lastMessage?.created_at || a.created_at;
+        const tb = b.lastMessage?.created_at || b.created_at;
+        return new Date(tb) - new Date(ta);
       });
   
       setChats(enriched);
     } catch (e) {
-      console.error('loadChats err', e);
+      console.error('loadChats error', e);
       setChats([]);
     } finally {
       setLoadingChats(false);
