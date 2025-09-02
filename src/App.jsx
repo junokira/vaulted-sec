@@ -588,7 +588,7 @@ export default function App() {
 
       const { data: inserted, error: insertErr } = await supabase
         .from("chats")
-        .insert([{ name: displayName || null, participants: [me, participantId] }])
+        .insert([{ name: displayName || null, participants: [me, participantId], is_group: false }])
         .select()
         .single();
 
@@ -618,6 +618,19 @@ export default function App() {
 
       if (rerr || !recipient) {
         return { error: "User not found" };
+      }
+      
+      // Check for existing invite to prevent "duplicate key" error
+      const { data: existingInvite } = await supabase
+        .from("invites")
+        .select("id")
+        .eq("sender_id", session.user.id)
+        .eq("recipient_id", recipient.id)
+        .eq("status", "pending")
+        .single();
+        
+      if (existingInvite) {
+        return { error: "An invite to this user is already pending." };
       }
 
       const { error } = await supabase.from("invites").insert([
