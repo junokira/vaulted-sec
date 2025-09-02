@@ -791,222 +791,218 @@ export default function App() {
     return userPresence;
   };
 
-  const bgImage = "https://placehold.co/1920x1080/1a1a1a/FFFFFF/png?text=Vaulted+Background";
+  /* --- Render --- */
+  if (!session) {
+    return (
+      <div className="bg-black min-h-screen flex items-center justify-center text-white font-sans">
+        <div className="p-8 rounded-2xl bg-gray-900 border border-gray-800 w-96 text-center">
+          <div className="w-16 h-16 rounded-full bg-gray-700 mx-auto flex items-center justify-center mb-4">
+            <span className="font-bold text-xl">V</span>
+          </div>
+          <h2 className="text-xl font-bold mb-2">Vaulted</h2>
+          <p className="text-sm text-gray-400 mb-4">Sign in to continue</p>
+          <AuthPanel
+            onSignInWithMagicLink={signInWithMagicLink}
+            onSignInWithPassword={signInWithPassword}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  if (needsProfileSetup) {
+    return (
+      <div className="bg-black min-h-screen flex items-center justify-center font-sans text-gray-300 p-4">
+        <div className="w-full max-w-lg mx-auto bg-gray-900 rounded-3xl overflow-hidden shadow-2xl ring-2 ring-gray-700 p-6">
+          <InitialProfileSetup
+            user={session.user}
+            onProfileCreate={updateProfile}
+          />
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div
-      className="bg-black min-h-screen flex flex-col items-center justify-center font-sans text-gray-300 p-4"
-      style={{
-        backgroundImage: `url(${bgImage})`,
-        backgroundSize: 'cover',
-        backgroundPosition: 'center',
-        backgroundAttachment: 'fixed',
-      }}
-    >
-      {/* Container for the main app UI */}
+    <div className="bg-black min-h-screen flex flex-col font-sans text-gray-300 p-4">
       <div className="w-full max-w-lg mx-auto h-[90vh] md:h-[90vh] bg-gray-900 rounded-3xl overflow-hidden shadow-2xl ring-2 ring-gray-700 flex flex-col">
-        {/* Render different views based on session and profile status */}
-        {!session ? (
-          <div className="flex-1 flex items-center justify-center">
-            <div className="p-8 rounded-2xl bg-gray-900 border border-gray-800 w-96 text-center">
-              <div className="w-16 h-16 rounded-full bg-gray-700 mx-auto flex items-center justify-center mb-4">
-                <span className="font-bold text-xl">V</span>
-              </div>
-              <h2 className="text-xl font-bold mb-2">Vaulted</h2>
-              <p className="text-sm text-gray-400 mb-4">Sign in to continue</p>
-              <AuthPanel
-                onSignInWithMagicLink={signInWithMagicLink}
-                onSignInWithPassword={signInWithPassword}
-              />
-            </div>
+        {/* Header */}
+        <div className="bg-black/80 p-4 flex items-center justify-between border-b border-gray-700">
+          <div className="flex items-center gap-4">
+            <div className="text-xl font-bold">Vaulted</div>
+            {userProfile?.username && <div className="text-sm text-gray-400">signed in as {userProfile.username}</div>}
           </div>
-        ) : needsProfileSetup ? (
-          <div className="flex-1 flex items-center justify-center p-6">
-            <InitialProfileSetup
-              user={session.user}
-              onProfileCreate={updateProfile}
+          <div className="flex items-center gap-4">
+            <button onClick={() => setShowProfileSettings(true)} className="p-2 rounded hover:bg-gray-800" title="Profile Settings">
+              <Settings className="w-5 h-5" />
+            </button>
+            <div className="relative">
+              <button onClick={() => setShowAddContact(true)} className="p-2 rounded hover:bg-gray-800" title="Add contact / Invites">
+                <Plus className="w-5 h-5" />
+              </button>
+            </div>
+            <button onClick={signOut} className="text-sm text-gray-400 hover:text-white">
+              Sign out
+            </button>
+          </div>
+        </div>
+
+        {/* Content */}
+        <div className="p-4 flex-1 flex flex-col">
+          {!activeChat ? (
+            <div>
+              {/* Search Bar */}
+              <div className="relative mb-4">
+                <input
+                  type="text"
+                  placeholder="Search messages..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && performSearch()}
+                  className="w-full p-3 pl-10 rounded-lg bg-gray-800 text-gray-200 border border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <Search className="w-5 h-5 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
+              </div>
+
+              {/* Search Results */}
+              {loadingSearch && <div className="text-sm text-gray-500 text-center">Searching...</div>}
+              {searchResults.length > 0 && (
+                <div className="mb-4">
+                  <h4 className="text-sm font-semibold text-gray-300 mb-2">Search Results</h4>
+                  <div className="space-y-2 max-h-40 overflow-y-auto">
+                    {searchResults.map((result) => (
+                      <div
+                        key={result.id}
+                        className="p-3 bg-gray-800 rounded-xl cursor-pointer hover:bg-gray-700"
+                        onClick={() => setActiveChat(chats.find(c => c.id === result.chat_id))}
+                      >
+                        <div className="text-sm font-semibold">{result.profiles?.username || 'Unknown'}</div>
+                        <div className="text-xs text-gray-400">{result.text.substring(0, 100)}...</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="space-y-3">
+                {loadingChats && <div className="text-sm text-gray-500">Loading chats…</div>}
+                {!loadingChats && chats.length === 0 && <div className="text-sm text-gray-500">No chats yet. Click + to add a contact.</div>}
+                {chats.map((chat) => {
+                  const otherUser = getOtherParticipant(chat);
+                  const lastMessage = chat.messages?.[0];
+                  return (
+                    <div key={chat.id} onClick={() => setActiveChat(chat)} className="p-3 rounded-xl bg-gray-800 hover:bg-gray-700 cursor-pointer flex items-center gap-3">
+                      <img
+                        src={otherUser?.avatar_url || "/default-avatar.png"}
+                        onError={(e) => { e.target.src = "/default-avatar.png"; }}
+                        className="w-10 h-10 rounded-full"
+                        alt="Avatar"
+                      />
+                      <div className="flex-1">
+                        <div className="text-gray-200">{getChatName(chat)}</div>
+                        {lastMessage && (
+                          <div className="text-xs text-gray-400">
+                            {lastMessage.text ? lastMessage.text.substring(0, 30) + (lastMessage.text.length > 30 ? '...' : '') : 'Media'}
+                          </div>
+                        )}
+                      </div>
+                      {unreadCounts[chat.id] > 0 && (
+                        <div className="bg-red-600 text-white text-xs px-2 py-0.5 rounded-full">
+                          {unreadCounts[chat.id]}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : (
+            <ChatWindow
+              chat={activeChat}
+              messages={messages}
+              loadingMessages={loadingMessages}
+              session={session}
+              userProfile={userProfile}
+              onBack={() => setActiveChat(null)}
+              onSend={sendMessage}
+              sendTypingEvent={sendTypingEvent}
+              typing={typing}
+              presence={presence}
+              receipts={receipts}
+              reactions={reactions}
+              addReaction={addReaction}
+              getMessageSnippet={getMessageSnippet}
+              handleFileUpload={handleFileUpload}
+              getChatName={getChatName}
+              getOtherParticipant={getOtherParticipant}
+              onCall={createCall}
+            />
+          )}
+        </div>
+      </div>
+
+      {/* Add Contact / Invites Modal */}
+      {showAddContact && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/70" onClick={() => setShowAddContact(false)}></div>
+          <div className="relative w-96 bg-gray-900 rounded-2xl p-6 border border-gray-800">
+            <AddContactPanel
+              invites={invites}
+              processingInviteIds={processingInviteIds}
+              onClose={() => {
+                setShowAddContact(false);
+                loadInvites(session.user.id);
+                loadChats(session.user.id);
+              }}
+              onSendInvite={async (username) => {
+                const res = await sendInviteToUsername(username);
+                if (res?.error) alert(res.error);
+                else {
+                  alert(`Invite sent to ${username}!`);
+                  await loadInvites(session.user.id);
+                }
+              }}
+              onAccept={acceptInvite}
+              onDeny={denyInvite}
+              onRefresh={() => loadInvites(session.user.id)}
             />
           </div>
-        ) : (
-          <>
-            {/* Header */}
-            <div className="bg-black/80 p-4 flex items-center justify-between border-b border-gray-700">
-              <div className="flex items-center gap-4">
-                <div className="text-xl font-bold">Vaulted</div>
-                {userProfile?.username && <div className="text-sm text-gray-400">signed in as {userProfile.username}</div>}
-              </div>
-              <div className="flex items-center gap-4">
-                <button onClick={() => setShowProfileSettings(true)} className="p-2 rounded hover:bg-gray-800" title="Profile Settings">
-                  <Settings className="w-5 h-5" />
-                </button>
-                <div className="relative">
-                  <button onClick={() => setShowAddContact(true)} className="p-2 rounded hover:bg-gray-800" title="Add contact / Invites">
-                    <Plus className="w-5 h-5" />
-                  </button>
-                </div>
-                <button onClick={signOut} className="text-sm text-gray-400 hover:text-white">
-                  Sign out
-                </button>
-              </div>
-            </div>
+        </div>
+      )}
 
-            {/* Content */}
-            <div className="p-4 flex-1 flex flex-col">
-              {!activeChat ? (
-                <div>
-                  {/* Search Bar */}
-                  <div className="relative mb-4">
-                    <input
-                      type="text"
-                      placeholder="Search messages..."
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                      onKeyDown={(e) => e.key === 'Enter' && performSearch()}
-                      className="w-full p-3 pl-10 rounded-lg bg-gray-800 text-gray-200 border border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    />
-                    <Search className="w-5 h-5 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                  </div>
-
-                  {/* Search Results */}
-                  {loadingSearch && <div className="text-sm text-gray-500 text-center">Searching...</div>}
-                  {searchResults.length > 0 && (
-                    <div className="mb-4">
-                      <h4 className="text-sm font-semibold text-gray-300 mb-2">Search Results</h4>
-                      <div className="space-y-2 max-h-40 overflow-y-auto">
-                        {searchResults.map((result) => (
-                          <div
-                            key={result.id}
-                            className="p-3 bg-gray-800 rounded-xl cursor-pointer hover:bg-gray-700"
-                            onClick={() => setActiveChat(chats.find(c => c.id === result.chat_id))}
-                          >
-                            <div className="text-sm font-semibold">{result.profiles?.username || 'Unknown'}</div>
-                            <div className="text-xs text-gray-400">{result.text.substring(0, 100)}...</div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  <div className="space-y-3">
-                    {loadingChats && <div className="text-sm text-gray-500">Loading chats…</div>}
-                    {!loadingChats && chats.length === 0 && <div className="text-sm text-gray-500">No chats yet. Click + to add a contact.</div>}
-                    {chats.map((chat) => {
-                      const otherUser = getOtherParticipant(chat);
-                      const lastMessage = chat.messages?.[0];
-                      return (
-                        <div key={chat.id} onClick={() => setActiveChat(chat)} className="p-3 rounded-xl bg-gray-800 hover:bg-gray-700 cursor-pointer flex items-center gap-3">
-                          <img
-                            src={otherUser?.avatar_url || "/default-avatar.png"}
-                            onError={(e) => { e.target.src = "/default-avatar.png"; }}
-                            className="w-10 h-10 rounded-full"
-                            alt="Avatar"
-                          />
-                          <div className="flex-1">
-                            <div className="text-gray-200">{getChatName(chat)}</div>
-                            {lastMessage && (
-                              <div className="text-xs text-gray-400">
-                                {lastMessage.text ? lastMessage.text.substring(0, 30) + (lastMessage.text.length > 30 ? '...' : '') : 'Media'}
-                              </div>
-                            )}
-                          </div>
-                          {unreadCounts[chat.id] > 0 && (
-                            <div className="bg-red-600 text-white text-xs px-2 py-0.5 rounded-full">
-                              {unreadCounts[chat.id]}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              ) : (
-                <ChatWindow
-                  chat={activeChat}
-                  messages={messages}
-                  loadingMessages={loadingMessages}
-                  session={session}
-                  userProfile={userProfile}
-                  onBack={() => setActiveChat(null)}
-                  onSend={sendMessage}
-                  sendTypingEvent={sendTypingEvent}
-                  typing={typing}
-                  presence={presence}
-                  receipts={receipts}
-                  reactions={reactions}
-                  addReaction={addReaction}
-                  getMessageSnippet={getMessageSnippet}
-                  handleFileUpload={handleFileUpload}
-                  getChatName={getChatName}
-                  getOtherParticipant={getOtherParticipant}
-                  onCall={createCall}
-                />
-              )}
-            </div>
-          </>
-        )}
-
-        {/* Add Contact / Invites Modal */}
-        {showAddContact && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center">
-            <div className="absolute inset-0 bg-black/70" onClick={() => setShowAddContact(false)}></div>
-            <div className="relative w-96 bg-gray-900 rounded-2xl p-6 border border-gray-800">
-              <AddContactPanel
-                invites={invites}
-                processingInviteIds={processingInviteIds}
-                onClose={() => {
-                  setShowAddContact(false);
-                  loadInvites(session.user.id);
-                  loadChats(session.user.id);
-                }}
-                onSendInvite={async (username) => {
-                  const res = await sendInviteToUsername(username);
-                  if (res?.error) alert(res.error);
-                  else {
-                    alert(`Invite sent to ${username}!`);
-                    await loadInvites(session.user.id);
-                  }
-                }}
-                onAccept={acceptInvite}
-                onDeny={denyInvite}
-                onRefresh={() => loadInvites(session.user.id)}
-              />
-            </div>
+      {/* Profile Settings Modal */}
+      {showProfileSettings && userProfile && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/70" onClick={() => setShowProfileSettings(false)}></div>
+          <div className="relative w-96 bg-gray-900 rounded-2xl p-6 border border-gray-800">
+            <ProfileSettingsPanel
+              userProfile={userProfile}
+              updateProfile={updateProfile}
+              uploadAvatar={uploadAvatar}
+              onClose={() => setShowProfileSettings(false)}
+            />
           </div>
-        )}
-
-        {/* Profile Settings Modal */}
-        {showProfileSettings && userProfile && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center">
-            <div className="absolute inset-0 bg-black/70" onClick={() => setShowProfileSettings(false)}></div>
-            <div className="relative w-96 bg-gray-900 rounded-2xl p-6 border border-gray-800">
-              <ProfileSettingsPanel
-                userProfile={userProfile}
-                updateProfile={updateProfile}
-                uploadAvatar={uploadAvatar}
-                onClose={() => setShowProfileSettings(false)}
-              />
-            </div>
-          </div>
-        )}
-        
-        {/* Call Indicator (NEW) */}
-        {incomingCall && !activeChat && (
-          <CallIndicator
-            call={incomingCall}
-            onAccept={() => {
-              setActiveChat(chats.find(c => c.id === incomingCall.chat_id));
-              setActiveCall(incomingCall);
-              setIncomingCall(null);
-            }}
-            onReject={() => setIncomingCall(null)}
-          />
-        )}
-        
-        {/* Call Panel (NEW) */}
-        {activeCall && (
-          <CallPanel call={activeCall} onEndCall={endCall} />
-        )}
-      </div>
+        </div>
+      )}
+      
+      {/* Call Indicator (NEW) */}
+      {incomingCall && !activeChat && (
+        <CallIndicator
+          call={incomingCall}
+          onAccept={() => {
+            setActiveChat(chats.find(c => c.id === incomingCall.chat_id));
+            setActiveCall(incomingCall);
+            setIncomingCall(null);
+          }}
+          onReject={() => setIncomingCall(null)}
+        />
+      )}
+      
+      {/* Call Panel (NEW) */}
+      {activeCall && (
+        <CallPanel call={activeCall} onEndCall={endCall} />
+      )}
+      
     </div>
   );
 }
