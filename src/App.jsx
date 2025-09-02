@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef } from "react";
 import { createClient } from "@supabase/supabase-js";
-import { ArrowLeft, Plus, Settings, Search, Paperclip, Smile } from "lucide-react";
+import { ArrowLeft, Plus, Settings, Search, Paperclip, Smile, Phone, Video } from "lucide-react";
 
 /* -------------------------
   Supabase client (env)
@@ -25,6 +25,7 @@ export default function App() {
   const [messages, setMessages] = useState([]);
   const [unreadCounts, setUnreadCounts] = useState({});
   const [showAddContact, setShowAddContact] = useState(false);
+  const [showAddGroupChat, setShowAddGroupChat] = useState(false); // NEW
   const [showProfileSettings, setShowProfileSettings] = useState(false);
   const [invites, setInvites] = useState([]);
   const [loadingChats, setLoadingChats] = useState(false);
@@ -38,6 +39,8 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [loadingSearch, setLoadingSearch] = useState(false);
+  const [incomingCall, setIncomingCall] = useState(null); // NEW
+  const [activeCall, setActiveCall] = useState(null); // NEW
 
   const messageChannelRef = useRef(null);
   const typingChannelRef = useRef(null);
@@ -149,6 +152,21 @@ export default function App() {
         () => fetchReactions()
       )
       .subscribe();
+      
+    // Realtime subscription for calls (NEW)
+    const callsChannel = supabase
+      .channel("public:calls")
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "calls", filter: `participants.cs.{"${userProfile.id}"}` },
+        (payload) => {
+          const call = payload.new;
+          if (call.is_active && call.participants.includes(userProfile.id)) {
+            setIncomingCall(call);
+          }
+        }
+      )
+      .subscribe();
 
     // Presence & Typing channels
     const presenceChannel = supabase.channel("presence", {
@@ -184,6 +202,7 @@ export default function App() {
       supabase.removeChannel(messagesChannel);
       supabase.removeChannel(receiptsChannel);
       supabase.removeChannel(reactionsChannel);
+      supabase.removeChannel(callsChannel); // Clean up call channel
       supabase.removeChannel(presenceChannel);
       supabase.removeChannel(typingChannel);
     };
@@ -448,7 +467,7 @@ export default function App() {
       // Update the optimistic message with the real message ID
       setMessages(prev => prev.map(msg => msg.id === tempId ? data[0] : msg));
 
-      // Mark the sent message as read
+      // Mark the sent message as read for the sender
       await supabase.from("message_receipts").insert({ message_id: data[0].id, user_id: session.user.id, status: 'read' });
       
     } catch (err) {
@@ -564,43 +583,38 @@ export default function App() {
     return message.text?.substring(0, 30) + '...';
   }
 
-  /* --- Robust chat finder/creator --- */
-  async function getOrCreateChatWith(participantId, displayName) {
-    if (!session || !participantId) return null;
+  /* --- Chat finder/creator (UPDATED FOR GROUPS) --- */
+  async function createChat({ participants, name = null, isGroup = false }) {
+    if (!session || !participants || participants.length === 0) return null;
     const me = session.user.id;
 
+    if (!isGroup) {
+      // Logic for 1-on-1 chats
+      const { data: existingChat } = await supabase
+        .from('chats')
+        .select('id, participants')
+        .contains('participants', [me, participants[0]])
+        .eq('is_group', false);
+
+      if (existingChat && existingChat.length > 0) {
+        await loadChats(me);
+        return existingChat[0];
+      }
+    }
+
     try {
-      const { data: candidateChats, error: candErr } = await supabase
-        .from("chats")
-        .select("id, name, participants")
-        .contains("participants", [me]);
-
-      if (candErr) {
-        console.error("getOrCreateChatWith - candidate fetch error:", candErr);
-      }
-
-      const found = (candidateChats || []).find((c) => c.participants.includes(participantId) && c.participants.length === 2);
-
-      if (found) {
-        await loadChats(session.user.id);
-        return found;
-      }
-
       const { data: inserted, error: insertErr } = await supabase
         .from("chats")
-        .insert([{ name: displayName || null, participants: [me, participantId], is_group: false }])
+        .insert([{ name, participants: [me, ...participants], is_group: isGroup }])
         .select()
         .single();
 
-      if (insertErr) {
-        console.error("getOrCreateChatWith - insert err:", insertErr);
-        return null;
-      }
+      if (insertErr) throw insertErr;
 
-      await loadChats(session.user.id);
+      await loadChats(me);
       return inserted;
     } catch (err) {
-      console.error("getOrCreateChatWith err:", err);
+      console.error("createChat err:", err);
       return null;
     }
   }
@@ -620,17 +634,10 @@ export default function App() {
         return { error: "User not found" };
       }
       
-      // Check for existing invite to prevent "duplicate key" error
-      const { data: existingInvite } = await supabase
-        .from("invites")
-        .select("id")
-        .eq("sender_id", session.user.id)
-        .eq("recipient_id", recipient.id)
-        .eq("status", "pending")
-        .single();
-        
+      const { data: existingInvite } = await supabase.from('invites').select('id').match({ sender_id: session.user.id, recipient_id: recipient.id, status: 'pending' }).maybeSingle();
+
       if (existingInvite) {
-        return { error: "An invite to this user is already pending." };
+        return { error: "Invite already sent to this user." };
       }
 
       const { error } = await supabase.from("invites").insert([
@@ -658,7 +665,7 @@ export default function App() {
       const { error: uerr } = await supabase.from("invites").update({ status: "accepted" }).eq("id", inviteId);
       if (uerr) console.error("acceptInvite update err:", uerr);
 
-      const chat = await getOrCreateChatWith(senderId, senderName || undefined);
+      const chat = await createChat({ participants: [senderId], isGroup: false });
 
       if (!chat) {
         alert("Accepted invite but failed to create or find chat. See console.");
@@ -699,6 +706,46 @@ export default function App() {
       console.error("denyInvite err:", err);
     }
   }
+  
+  // Call functionality (NEW)
+  async function createCall(type) {
+    if (!activeChat || !session) return;
+    
+    try {
+      const { data, error } = await supabase
+        .from('calls')
+        .insert({
+          chat_id: activeChat.id,
+          participants: activeChat.participants,
+          is_active: true,
+        })
+        .select()
+        .single();
+        
+      if (error) throw error;
+      
+      setActiveCall({ ...data, type });
+      alert(`Starting a ${type} call...`);
+      // NOTE: Actual WebRTC connection logic would go here.
+      // This is just for the database record and UI.
+      
+    } catch (error) {
+      console.error("Error creating call:", error);
+      alert("Failed to start call. See console.");
+    }
+  }
+
+  async function endCall() {
+    if (!activeCall) return;
+    try {
+      await supabase.from('calls').update({ is_active: false, ended_at: new Date() }).eq('id', activeCall.id);
+      setActiveCall(null);
+      setIncomingCall(null);
+    } catch (error) {
+      console.error("Error ending call:", error);
+    }
+  }
+
 
   /* --- Auth helpers --- */
   async function signInWithMagicLink(email) {
@@ -727,15 +774,17 @@ export default function App() {
   }
 
   /* --- UI helpers --- */
-  function otherParticipantName(chat) {
-    if (!chat || !session) return "Unknown";
+  function getChatName(chat) {
+    if (chat.is_group) return chat.name || "Group Chat";
+    
     const other = (chat.participantsInfo || []).find((p) => p.id !== session.user.id);
-    return other?.username || other?.full_name || chat.name || "Unknown";
+    return other?.username || other?.full_name || "Unknown";
   }
 
-  const getOtherParticipant = (chat) => {
+  function getOtherParticipant(chat) {
+    if (chat.is_group) return null;
     return chat.participantsInfo?.find(p => p.id !== session.user.id) || null;
-  };
+  }
 
   const getPresence = (userId) => {
     const userPresence = presence[userId]?.[0] || null;
@@ -787,9 +836,11 @@ export default function App() {
             <button onClick={() => setShowProfileSettings(true)} className="p-2 rounded hover:bg-gray-800" title="Profile Settings">
               <Settings className="w-5 h-5" />
             </button>
-            <button onClick={() => setShowAddContact(true)} className="p-2 rounded hover:bg-gray-800" title="Add contact / Invites">
-              <Plus className="w-5 h-5" />
-            </button>
+            <div className="relative">
+              <button onClick={() => setShowAddContact(true)} className="p-2 rounded hover:bg-gray-800" title="Add contact / Invites">
+                <Plus className="w-5 h-5" />
+              </button>
+            </div>
             <button onClick={signOut} className="text-sm text-gray-400 hover:text-white">
               Sign out
             </button>
@@ -848,7 +899,7 @@ export default function App() {
                         alt="Avatar"
                       />
                       <div className="flex-1">
-                        <div className="text-gray-200">{otherParticipantName(chat)}</div>
+                        <div className="text-gray-200">{getChatName(chat)}</div>
                         {lastMessage && (
                           <div className="text-xs text-gray-400">
                             {lastMessage.text ? lastMessage.text.substring(0, 30) + (lastMessage.text.length > 30 ? '...' : '') : 'Media'}
@@ -882,6 +933,9 @@ export default function App() {
               addReaction={addReaction}
               getMessageSnippet={getMessageSnippet}
               handleFileUpload={handleFileUpload}
+              getChatName={getChatName}
+              getOtherParticipant={getOtherParticipant}
+              onCall={createCall}
             />
           )}
         </div>
@@ -930,6 +984,25 @@ export default function App() {
           </div>
         </div>
       )}
+      
+      {/* Call Indicator (NEW) */}
+      {incomingCall && !activeChat && (
+        <CallIndicator
+          call={incomingCall}
+          onAccept={() => {
+            setActiveChat(chats.find(c => c.id === incomingCall.chat_id));
+            setActiveCall(incomingCall);
+            setIncomingCall(null);
+          }}
+          onReject={() => setIncomingCall(null)}
+        />
+      )}
+      
+      {/* Call Panel (NEW) */}
+      {activeCall && (
+        <CallPanel call={activeCall} onEndCall={endCall} />
+      )}
+      
     </div>
   );
 }
@@ -982,7 +1055,7 @@ function AuthPanel({ onSignInWithMagicLink, onSignInWithPassword }) {
   );
 }
 
-function ChatWindow({ chat, messages, onBack, onSend, loadingMessages, session, userProfile, typing, presence, receipts, reactions, addReaction, getMessageSnippet, handleFileUpload }) {
+function ChatWindow({ chat, messages, onBack, onSend, loadingMessages, session, userProfile, typing, presence, receipts, reactions, addReaction, getMessageSnippet, handleFileUpload, getChatName, getOtherParticipant, onCall }) {
   const [text, setText] = useState("");
   const messagesEndRef = useRef();
 
@@ -990,14 +1063,13 @@ function ChatWindow({ chat, messages, onBack, onSend, loadingMessages, session, 
     if (messagesEndRef.current) messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  const otherParticipant = chat.participantsInfo?.find(p => p.id !== session.user.id);
-  const chatName = otherParticipant?.username || otherParticipant?.full_name || "Conversation";
+  const otherParticipant = getOtherParticipant(chat);
   const isTyping = typing[otherParticipant?.id];
 
   const getPresence = (userId) => {
     return presence[userId]?.[0] || null;
   };
-  const otherPresence = getPresence(otherParticipant?.id);
+  const otherPresence = otherParticipant ? getPresence(otherParticipant?.id) : null;
   
   const [replyToMessage, setReplyToMessage] = useState(null);
 
@@ -1007,23 +1079,43 @@ function ChatWindow({ chat, messages, onBack, onSend, loadingMessages, session, 
         <button onClick={onBack} className="p-1 rounded hover:bg-gray-800">
           <ArrowLeft className="w-5 h-5" />
         </button>
-        <img
-          src={otherParticipant?.avatar_url || "/default-avatar.png"}
-          onError={(e) => { e.target.src = "/default-avatar.png"; }}
-          className="w-10 h-10 rounded-full"
-          alt="Avatar"
-        />
-        <div>
-          <div className="text-lg font-semibold">{chatName}</div>
-          {otherPresence?.online ? (
-            <div className="text-xs text-green-400">● Online</div>
-          ) : otherPresence?.last_seen && (
-            <div className="text-xs text-gray-400">Last seen {new Date(otherPresence.last_seen).toLocaleTimeString()}</div>
+        <div className="flex items-center gap-3 flex-1">
+          {chat.is_group ? (
+            <div className="w-10 h-10 rounded-full bg-gray-700 flex items-center justify-center">
+              <span className="text-white text-sm">G</span>
+            </div>
+          ) : (
+            <img
+              src={otherParticipant?.avatar_url || "/default-avatar.png"}
+              onError={(e) => { e.target.src = "/default-avatar.png"; }}
+              className="w-10 h-10 rounded-full"
+              alt="Avatar"
+            />
           )}
+          <div>
+            <div className="text-lg font-semibold">{getChatName(chat)}</div>
+            {otherParticipant && (
+              otherPresence?.online ? (
+                <div className="text-xs text-green-400">● Online</div>
+              ) : otherPresence?.last_seen && (
+                <div className="text-xs text-gray-400">Last seen {new Date(otherPresence.last_seen).toLocaleTimeString()}</div>
+              )
+            )}
+          </div>
+        </div>
+        
+        {/* Call Buttons (NEW) */}
+        <div className="flex gap-2">
+          <button onClick={() => onCall("audio")} className="p-2 rounded-full hover:bg-gray-800">
+            <Phone className="w-5 h-5 text-gray-400" />
+          </button>
+          <button onClick={() => onCall("video")} className="p-2 rounded-full hover:bg-gray-800">
+            <Video className="w-5 h-5 text-gray-400" />
+          </button>
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-3 space-y-3 rounded-lg bg-transparent">
+      <div className="flex-1 overflow-y-auto p-3 space-y-4 rounded-lg bg-transparent"> {/* Increased space-y-4 */}
         {loadingMessages ? (
           <div className="text-sm text-gray-500 mt-6 text-center">Loading messages...</div>
         ) : (
@@ -1040,6 +1132,7 @@ function ChatWindow({ chat, messages, onBack, onSend, loadingMessages, session, 
                 addReaction={addReaction}
                 getMessageSnippet={getMessageSnippet}
                 onReply={() => setReplyToMessage(m)}
+                userProfile={userProfile}
               />
             ))
           )
@@ -1084,10 +1177,9 @@ function ChatWindow({ chat, messages, onBack, onSend, loadingMessages, session, 
   );
 }
 
-function MessageBubble({ msg, isSender, receipts, reactions, addReaction, getMessageSnippet, onReply }) {
+function MessageBubble({ msg, isSender, receipts, reactions, addReaction, getMessageSnippet, onReply, userProfile }) {
   const [showReactions, setShowReactions] = useState(false);
-  const isReadByAll = receipts?.filter(r => r.status === 'read').length === 2;
-
+  
   const renderContent = () => {
     if (msg.type === 'image') {
       return <img src={msg.content} className="max-w-xs rounded-lg" alt="Sent media" />;
@@ -1098,7 +1190,7 @@ function MessageBubble({ msg, isSender, receipts, reactions, addReaction, getMes
     if (msg.type === 'file') {
       return <a href={msg.content} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline">Download file</a>;
     }
-    return <div>{msg.text}</div>;
+    return <div className="text-base">{msg.text}</div>;
   };
   
   const handleAddReaction = (emoji) => {
@@ -1107,6 +1199,13 @@ function MessageBubble({ msg, isSender, receipts, reactions, addReaction, getMes
   };
   
   const availableEmojis = ['👍', '❤️', '😂', '😮', '😢', '🔥', '🎉'];
+
+  const receiptUsers = receipts || [];
+  const readReceipts = receiptUsers.filter(r => r.status === 'read');
+  const deliveredReceipts = receiptUsers.filter(r => r.status === 'delivered');
+
+  const showReadStatus = isSender && readReceipts.length > 0;
+  const showDeliveredStatus = isSender && deliveredReceipts.length > 0 && !showReadStatus;
 
   return (
     <div className={`flex ${isSender ? 'justify-end' : 'justify-start'}`}>
@@ -1117,24 +1216,22 @@ function MessageBubble({ msg, isSender, receipts, reactions, addReaction, getMes
           className="w-8 h-8 rounded-full"
           alt="Avatar"
         />
-        <div className="group relative">
+        <div className="group relative max-w-sm">
           <div
-            className={`max-w-[80%] p-3 rounded-2xl text-sm ${isSender ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-200'}`}
-            onMouseEnter={() => setShowReactions(true)}
-            onMouseLeave={() => setShowReactions(false)}
+            className={`p-3 rounded-2xl ${isSender ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-200'}`}
           >
-            <div className="font-semibold text-xs text-gray-400 mb-1">{isSender ? "You" : (msg.profiles?.username || "Unknown")}</div>
+            <div className="font-semibold text-sm text-gray-400 mb-1">{isSender ? "You" : (msg.profiles?.username || "Unknown")}</div>
             {msg.reply_to && (
-              <div className="text-xs text-gray-500 border-l-2 pl-2 mb-1">
+              <div className="text-xs text-gray-500 border-l-2 border-gray-500 pl-2 mb-1">
                 ↪ Replying to: {getMessageSnippet(msg.reply_to)}
               </div>
             )}
             {renderContent()}
             
             {reactions?.length > 0 && (
-              <div className="flex gap-1 mt-1">
+              <div className="flex flex-wrap gap-1 mt-1">
                 {reactions.map((r) => (
-                  <span key={r.emoji} className="px-1 bg-gray-700 rounded-full text-xs">
+                  <span key={r.emoji} className="px-2 py-0.5 bg-gray-700 rounded-full text-xs">
                     {r.emoji} {r.count}
                   </span>
                 ))}
@@ -1142,16 +1239,17 @@ function MessageBubble({ msg, isSender, receipts, reactions, addReaction, getMes
             )}
             
             <div className="text-xs text-gray-400 mt-1 flex justify-end items-center gap-1">
-              {new Date(msg.created_at).toLocaleTimeString()}
-              {isSender && (
-                <span>
-                  {isReadByAll ? "✓✓" : "✓"}
-                </span>
+              {new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+              {showReadStatus && (
+                <span title="Read">✓✓</span>
+              )}
+              {showDeliveredStatus && (
+                <span title="Delivered">✓</span>
               )}
             </div>
           </div>
           
-          <div className={`absolute -top-8 flex gap-1 bg-gray-700 p-1 rounded-full ${isSender ? 'right-0' : 'left-0'} transition-opacity ${showReactions ? 'opacity-100' : 'opacity-0'}`}>
+          <div className={`absolute -top-8 flex gap-1 bg-gray-700 p-1 rounded-full ${isSender ? 'right-0' : 'left-0'} opacity-0 group-hover:opacity-100 transition-opacity`}>
             {availableEmojis.map(emoji => (
               <button key={emoji} onClick={() => handleAddReaction(emoji)} className="p-1 hover:bg-gray-600 rounded-full text-lg">
                 {emoji}
@@ -1213,6 +1311,55 @@ function AddContactPanel({ onClose, onSendInvite, invites = [], onAccept, onDeny
     </div>
   );
 }
+
+// NEW COMPONENT
+function CallIndicator({ call, onAccept, onReject }) {
+  const [senderProfile, setSenderProfile] = useState(null);
+  
+  useEffect(() => {
+    async function fetchSender() {
+      const senderId = call.participants.find(id => id !== call.caller_id);
+      if (senderId) {
+        const { data } = await supabase.from('profiles').select('username').eq('id', senderId).single();
+        setSenderProfile(data);
+      }
+    }
+    fetchSender();
+  }, [call]);
+  
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="absolute inset-0 bg-black/70"></div>
+      <div className="relative w-96 bg-gray-900 rounded-2xl p-6 text-center border border-gray-800">
+        <h3 className="text-xl font-bold mb-2">{senderProfile?.username || "Someone"} is calling...</h3>
+        <div className="flex justify-center gap-4 mt-4">
+          <button onClick={onAccept} className="bg-green-600 text-white p-3 rounded-full hover:bg-green-700">
+            <Phone className="w-6 h-6" />
+          </button>
+          <button onClick={onReject} className="bg-red-600 text-white p-3 rounded-full hover:bg-red-700">
+            <Phone className="w-6 h-6 rotate-[135deg]" />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// NEW COMPONENT
+function CallPanel({ call, onEndCall }) {
+  return (
+    <div className="fixed inset-0 z-50 bg-gray-900 flex flex-col items-center justify-center text-white">
+      <h3 className="text-xl font-bold mb-2">Call in progress...</h3>
+      <p className="text-sm text-gray-400 mb-4">You are in a live call with {call.participants.length - 1} other participant(s).</p>
+      <div className="flex justify-center gap-4 mt-4">
+        <button onClick={onEndCall} className="bg-red-600 text-white p-4 rounded-full hover:bg-red-700">
+          <Phone className="w-8 h-8 rotate-[135deg]" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 
 function InitialProfileSetup({ user, onProfileCreate }) {
   const [username, setUsername] = useState("");
